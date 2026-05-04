@@ -1,0 +1,7 @@
+CPSC4240FinalProjVenv/
+benchmark
+results/
+report/
+python/__pycache__/
+*.pyc
+.DS_Store
