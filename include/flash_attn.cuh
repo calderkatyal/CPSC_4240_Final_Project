@@ -48,20 +48,6 @@ void flash_attention_v2(
 );
 
 // ============================================================================
-// FA3-inspired extension:
-//   - keeps the same exact attention computation as the simplified V2 split-KV kernel
-//   - adds a portable double-buffered K/V staging structure to model pipelining
-//
-// Note: this is not a Hopper TMA / warp-specialized official FlashAttention-3
-// implementation.
-// ============================================================================
-void flash_attention_v3(
-    const project_in_t* d_Q, const project_in_t* d_K, const project_in_t* d_V,
-    project_out_t* d_O,
-    int B, int H, int N, int d, float scale, bool causal
-);
-
-// ============================================================================
 // Ablation variants
 // ============================================================================
 

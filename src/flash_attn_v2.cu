@@ -23,7 +23,7 @@ void flash_attention_v2(
     float scale,
     bool causal
 ) {
-    project_flash::launch_flash_attention_splitkv<false>(
+    project_flash::launch_flash_attention_splitkv(
         d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
     );
 }

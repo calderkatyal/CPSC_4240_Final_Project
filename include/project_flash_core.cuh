@@ -81,7 +81,6 @@ __device__ inline void compute_score_tile_tensor_core(
     wmma::store_matrix_sync(s_scores, c_frag, PROJECT_TILE, wmma::mem_row_major);
 }
 
-template <bool SkipCausalTiles, bool DoubleBuffer>
 __global__ void flash_attention_core_kernel(
     const project_in_t* __restrict__ Q,
     const project_in_t* __restrict__ K,
@@ -110,11 +109,7 @@ __global__ void flash_attention_core_kernel(
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt0 = s_q + PROJECT_TILE * d;
     project_in_t* s_v0 = s_kt0 + PROJECT_TILE * d;
-    project_in_t* s_kt1 = DoubleBuffer ? (s_v0 + PROJECT_TILE * d) : nullptr;
-    project_in_t* s_v1 = DoubleBuffer ? (s_kt1 + PROJECT_TILE * d) : nullptr;
-    float* s_scores = reinterpret_cast<float*>(
-        DoubleBuffer ? (s_v1 + PROJECT_TILE * d) : (s_v0 + PROJECT_TILE * d)
-    );
+    float* s_scores = reinterpret_cast<float*>(s_v0 + PROJECT_TILE * d);
     float* s_o = s_scores + PROJECT_TILE * PROJECT_TILE;
     float* s_m = s_o + PROJECT_TILE * d;
     float* s_l = s_m + PROJECT_TILE;
@@ -130,38 +125,13 @@ __global__ void flash_attention_core_kernel(
     __syncthreads();
 
     int num_kv_tiles = cdiv(N, PROJECT_TILE);
-    if (causal && SkipCausalTiles) {
-        num_kv_tiles = cdiv(q_end + 1, PROJECT_TILE);
-    }
-
-    if constexpr (DoubleBuffer) {
-        load_kv_tile(s_kt0, s_v0, k_base, v_base, 0, N, d);
-        __syncthreads();
-    }
 
     for (int kv_tile = 0; kv_tile < num_kv_tiles; kv_tile++) {
         int kv_start = kv_tile * PROJECT_TILE;
-        project_in_t* s_kt_cur = s_kt0;
-        project_in_t* s_v_cur = s_v0;
-
-        if constexpr (DoubleBuffer) {
-            int cur_buf = kv_tile & 1;
-            int next_buf = 1 - cur_buf;
-            s_kt_cur = (cur_buf == 0) ? s_kt0 : s_kt1;
-            s_v_cur = (cur_buf == 0) ? s_v0 : s_v1;
-
-            if (kv_tile + 1 < num_kv_tiles) {
-                int next_start = (kv_tile + 1) * PROJECT_TILE;
-                project_in_t* s_kt_next = (next_buf == 0) ? s_kt0 : s_kt1;
-                project_in_t* s_v_next = (next_buf == 0) ? s_v0 : s_v1;
-                load_kv_tile(s_kt_next, s_v_next, k_base, v_base, next_start, N, d);
-            }
-        } else {
-            load_kv_tile(s_kt0, s_v0, k_base, v_base, kv_start, N, d);
-        }
+        load_kv_tile(s_kt0, s_v0, k_base, v_base, kv_start, N, d);
 
         __syncthreads();
-        compute_score_tile_tensor_core(s_scores, s_q, s_kt_cur, d, scale);
+        compute_score_tile_tensor_core(s_scores, s_q, s_kt0, d, scale);
         __syncthreads();
 
         if (lane < PROJECT_TILE) {
@@ -193,13 +163,13 @@ __global__ void flash_attention_core_kernel(
                         continue;
                     }
 
-                    float p = expf(s_scores[row_in_tile * PROJECT_TILE + j] - m_new);
-                    l_new += p;
-                    for (int dd = 0; dd < d; dd++) {
-                        s_o[row_in_tile * d + dd] +=
-                            p * __half2float(s_v_cur[j * d + dd]);
+                        float p = expf(s_scores[row_in_tile * PROJECT_TILE + j] - m_new);
+                        l_new += p;
+                        for (int dd = 0; dd < d; dd++) {
+                            s_o[row_in_tile * d + dd] +=
+                                p * __half2float(s_v0[j * d + dd]);
+                        }
                     }
-                }
 
                 s_m[row_in_tile] = m_new;
                 s_l[row_in_tile] = l_new;
@@ -221,7 +191,6 @@ __global__ void flash_attention_core_kernel(
     }
 }
 
-template <bool SkipCausalTiles, bool DoubleBuffer>
 inline void launch_flash_attention_core(
     const project_in_t* d_Q,
     const project_in_t* d_K,
@@ -239,8 +208,8 @@ inline void launch_flash_attention_core(
     int BH = B * H;
     int num_q_tiles = cdiv(N, PROJECT_TILE);
     size_t smem_bytes = (PROJECT_TILE * d) * sizeof(project_in_t);
-    smem_bytes += (DoubleBuffer ? 2 : 1) * (PROJECT_TILE * d) * sizeof(project_in_t); // K^T
-    smem_bytes += (DoubleBuffer ? 2 : 1) * (PROJECT_TILE * d) * sizeof(project_in_t); // V
+    smem_bytes += (PROJECT_TILE * d) * sizeof(project_in_t); // K^T
+    smem_bytes += (PROJECT_TILE * d) * sizeof(project_in_t); // V
     smem_bytes += (PROJECT_TILE * PROJECT_TILE) * sizeof(float);                         // scores
     smem_bytes += (PROJECT_TILE * d) * sizeof(float);                                    // output accumulator
     smem_bytes += 2 * PROJECT_TILE * sizeof(float);                                      // m and l
@@ -248,7 +217,7 @@ inline void launch_flash_attention_core(
     dim3 block(32);
     dim3 grid(num_q_tiles, 1, BH);
 
-    flash_attention_core_kernel<SkipCausalTiles, DoubleBuffer><<<grid, block, smem_bytes>>>(
+    flash_attention_core_kernel<<<grid, block, smem_bytes>>>(
         d_Q, d_K, d_V, d_O, N, d, scale, causal
     );
 

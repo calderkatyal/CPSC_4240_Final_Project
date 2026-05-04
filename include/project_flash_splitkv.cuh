@@ -4,7 +4,6 @@
 
 namespace project_flash {
 
-template <bool DoubleBuffer>
 __global__ void flash_attention_splitkv_partial_kernel(
     const project_in_t* __restrict__ Q,
     const project_in_t* __restrict__ K,
@@ -36,11 +35,7 @@ __global__ void flash_attention_splitkv_partial_kernel(
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt0 = s_q + PROJECT_TILE * d;
     project_in_t* s_v0 = s_kt0 + PROJECT_TILE * d;
-    project_in_t* s_kt1 = DoubleBuffer ? (s_v0 + PROJECT_TILE * d) : nullptr;
-    project_in_t* s_v1 = DoubleBuffer ? (s_kt1 + PROJECT_TILE * d) : nullptr;
-    float* s_scores = reinterpret_cast<float*>(
-        DoubleBuffer ? (s_v1 + PROJECT_TILE * d) : (s_v0 + PROJECT_TILE * d)
-    );
+    float* s_scores = reinterpret_cast<float*>(s_v0 + PROJECT_TILE * d);
     float* s_o = s_scores + PROJECT_TILE * PROJECT_TILE;
     float* s_m = s_o + PROJECT_TILE * d;
     float* s_l = s_m + PROJECT_TILE;
@@ -69,39 +64,12 @@ __global__ void flash_attention_splitkv_partial_kernel(
         }
     }
 
-    if constexpr (DoubleBuffer) {
-        if (kv_tile_begin < kv_tile_end) {
-            load_kv_tile(
-                s_kt0, s_v0, k_base, v_base, kv_tile_begin * PROJECT_TILE, N, d
-            );
-        }
-        __syncthreads();
-    }
-
     for (int kv_tile = kv_tile_begin; kv_tile < kv_tile_end; kv_tile++) {
         int kv_start = kv_tile * PROJECT_TILE;
-        project_in_t* s_kt_cur = s_kt0;
-        project_in_t* s_v_cur = s_v0;
-
-        if constexpr (DoubleBuffer) {
-            int local_idx = kv_tile - kv_tile_begin;
-            int cur_buf = local_idx & 1;
-            int next_buf = 1 - cur_buf;
-            s_kt_cur = (cur_buf == 0) ? s_kt0 : s_kt1;
-            s_v_cur = (cur_buf == 0) ? s_v0 : s_v1;
-
-            if (kv_tile + 1 < kv_tile_end) {
-                int next_start = (kv_tile + 1) * PROJECT_TILE;
-                project_in_t* s_kt_next = (next_buf == 0) ? s_kt0 : s_kt1;
-                project_in_t* s_v_next = (next_buf == 0) ? s_v0 : s_v1;
-                load_kv_tile(s_kt_next, s_v_next, k_base, v_base, next_start, N, d);
-            }
-        } else {
-            load_kv_tile(s_kt0, s_v0, k_base, v_base, kv_start, N, d);
-        }
+        load_kv_tile(s_kt0, s_v0, k_base, v_base, kv_start, N, d);
 
         __syncthreads();
-        compute_score_tile_tensor_core(s_scores, s_q, s_kt_cur, d, scale);
+        compute_score_tile_tensor_core(s_scores, s_q, s_kt0, d, scale);
         __syncthreads();
 
         if (lane < PROJECT_TILE) {
@@ -137,7 +105,7 @@ __global__ void flash_attention_splitkv_partial_kernel(
                         l_new += p;
                         for (int dd = 0; dd < d; dd++) {
                             s_o[row_in_tile * d + dd] +=
-                                p * __half2float(s_v_cur[j * d + dd]);
+                                p * __half2float(s_v0[j * d + dd]);
                         }
                     }
 
@@ -219,7 +187,6 @@ static __global__ void flash_attention_splitkv_combine_kernel(
     }
 }
 
-template <bool DoubleBuffer>
 inline int choose_splitkv_splits(int B, int H, int N) {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
@@ -229,12 +196,10 @@ inline int choose_splitkv_splits(int B, int H, int N) {
     return project_num_splits_heuristic(B * H * num_q_tiles, effective_sms, num_kv_tiles, 8);
 }
 
-template <bool DoubleBuffer>
 inline size_t splitkv_workspace_bytes(int B, int H, int N, int d, int num_splits) {
     return static_cast<size_t>(num_splits) * B * H * N * (2 * sizeof(float) + d * sizeof(float));
 }
 
-template <bool DoubleBuffer>
 inline void launch_flash_attention_splitkv(
     const project_in_t* d_Q,
     const project_in_t* d_K,
@@ -250,9 +215,9 @@ inline void launch_flash_attention_splitkv(
     check_supported_head_dim(d);
     int BH = B * H;
     int num_q_tiles = cdiv(N, PROJECT_TILE);
-    int num_splits = choose_splitkv_splits<DoubleBuffer>(B, H, N);
+    int num_splits = choose_splitkv_splits(B, H, N);
     if (num_splits <= 1) {
-        launch_flash_attention_core<false, DoubleBuffer>(
+        launch_flash_attention_core(
             d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
         );
         return;
@@ -266,15 +231,15 @@ inline void launch_flash_attention_splitkv(
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&partial_o), (size_t)num_splits * BH * N * d * sizeof(float)));
 
     size_t partial_smem = (PROJECT_TILE * d) * sizeof(project_in_t);
-    partial_smem += (DoubleBuffer ? 2 : 1) * (PROJECT_TILE * d) * sizeof(project_in_t);
-    partial_smem += (DoubleBuffer ? 2 : 1) * (PROJECT_TILE * d) * sizeof(project_in_t);
+    partial_smem += (PROJECT_TILE * d) * sizeof(project_in_t);
+    partial_smem += (PROJECT_TILE * d) * sizeof(project_in_t);
     partial_smem += (PROJECT_TILE * PROJECT_TILE) * sizeof(float);
     partial_smem += (PROJECT_TILE * d) * sizeof(float);
     partial_smem += 2 * PROJECT_TILE * sizeof(float);
 
     dim3 block(32);
     dim3 grid_partial(num_q_tiles, num_splits, BH);
-    flash_attention_splitkv_partial_kernel<DoubleBuffer><<<grid_partial, block, partial_smem>>>(
+    flash_attention_splitkv_partial_kernel<<<grid_partial, block, partial_smem>>>(
         d_Q, d_K, d_V, partial_m, partial_l, partial_o, num_splits, N, d, scale, causal
     );
     CUDA_CHECK(cudaGetLastError());

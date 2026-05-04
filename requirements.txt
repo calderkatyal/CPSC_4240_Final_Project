@@ -1,0 +1,24 @@
+# Python dependencies for the simplified FlashAttention project.
+#
+# Important:
+#   Install PyTorch separately so it matches the CUDA toolkit you load on the
+#   cluster. For this project, CUDA 12.1.1 + cu121 PyTorch is the cleanest path.
+#   After PyTorch is installed, install the packages below and then optionally
+#   build flash-attn from source.
+#
+# Suggested cluster setup:
+#   module load CUDA/12.1.1
+#   python -m venv venv
+#   source venv/bin/activate
+#   pip install --upgrade pip
+#   pip install --index-url https://download.pytorch.org/whl/cu121 torch
+#   pip install -r requirements.txt
+#   MAX_JOBS=4 pip install flash-attn --no-build-isolation
+#
+# `flash-attn` is intentionally not listed below because it is CUDA/PyTorch-build
+# dependent and is more reliable when installed explicitly after PyTorch.
+
+numpy>=1.26,<3
+matplotlib>=3.8,<4
+packaging>=24,<26
+ninja>=1.11,<2

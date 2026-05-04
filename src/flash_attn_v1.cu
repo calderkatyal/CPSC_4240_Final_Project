@@ -21,7 +21,7 @@ void flash_attention_v1(
     float scale,
     bool causal
 ) {
-    project_flash::launch_flash_attention_core<false, false>(
+    project_flash::launch_flash_attention_core(
         d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
     );
 }

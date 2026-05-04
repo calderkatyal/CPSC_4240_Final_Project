@@ -24,7 +24,6 @@ COLORS = {
     "Naive": "#d62728",
     "Simplified FA1": "#1f77b4",
     "FA2-inspired extension": "#2ca02c",
-    "FA3-inspired extension": "#ff7f0e",
     "Official flash_attn (fp16)": "#9467bd",
     "Ablation: no online softmax": "#7f7f7f",
     "Ablation: no SRAM tiling": "#17becf",
@@ -34,7 +33,6 @@ MARKERS = {
     "Naive": "s",
     "Simplified FA1": "o",
     "FA2-inspired extension": "^",
-    "FA3-inspired extension": "D",
     "Official flash_attn (fp16)": "P",
     "Ablation: no online softmax": "x",
     "Ablation: no SRAM tiling": "h",
@@ -88,7 +86,6 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
         "Naive",
         "Simplified FA1",
         "FA2-inspired extension",
-        "FA3-inspired extension",
         "Official flash_attn (fp16)",
     ]
     for method in priority:
@@ -162,7 +159,6 @@ def plot_ablation_bars(groups, title: str, output_path: Path) -> None:
     candidates = [
         "Simplified FA1",
         "FA2-inspired extension",
-        "FA3-inspired extension",
         "Ablation: no online softmax",
         "Ablation: no SRAM tiling",
     ]

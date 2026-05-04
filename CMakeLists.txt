@@ -16,7 +16,6 @@ set(SOURCES
     src/naive_attention.cu
     src/flash_attn_v1.cu
     src/flash_attn_v2.cu
-    src/flash_attn_v3.cu
     src/ablations.cu
     src/benchmark.cu
 )

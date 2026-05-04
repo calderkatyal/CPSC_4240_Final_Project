@@ -4,7 +4,6 @@
 //   - a naive mixed-precision baseline that materializes the full N x N score matrix
 //   - a simplified FA1-style kernel with tensor-core score tiles
 //   - FA2-style split-KV sequence parallelism
-//   - FA3-style portable software pipelining layered on top of split-KV
 //   - FA1 ablations for online softmax and SRAM tiling
 //
 // Correctness is checked against a host-side float32 reference.
@@ -131,7 +130,6 @@ int main(int argc, char** argv) {
         {"Naive", naive_attention, 0},
         {"Simplified FA1", flash_attention_v1, 0},
         {"FA2-inspired extension", flash_attention_v2, 0},
-        {"FA3-inspired extension", flash_attention_v3, 0},
         {"Ablation: no online softmax", flash_attention_v1_no_online_softmax, 0},
         {"Ablation: no SRAM tiling", flash_attention_v1_no_tiling, 0},
     };
@@ -203,10 +201,6 @@ int main(int argc, char** argv) {
             if (std::string(method.name) == "FA2-inspired extension") {
                 int nsplits = project_flash::choose_splitkv_splits<false>(B, H, N);
                 mem += project_flash::splitkv_workspace_bytes<false>(B, H, N, d, nsplits);
-            }
-            if (std::string(method.name) == "FA3-inspired extension") {
-                int nsplits = project_flash::choose_splitkv_splits<true>(B, H, N);
-                mem += project_flash::splitkv_workspace_bytes<true>(B, H, N, d, nsplits);
             }
             if (std::string(method.name) == "Ablation: no online softmax") {
                 mem += (size_t)B * H * N * sizeof(float);
