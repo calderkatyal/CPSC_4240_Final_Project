@@ -48,7 +48,7 @@ CPSC 4240: Parallel Programming \\
 \maketitle
 
 \begin{abstract}
-FlashAttention is the standard exact attention kernel used in modern large language models because it substantially reduces high-bandwidth-memory traffic while preserving exact attention outputs. In this project, we implement a compact CUDA C++ attention benchmark suite centered on the most important broad ideas from FlashAttention-1: shared-memory tiling, online softmax, fused score/softmax/value computation, mixed precision, and tensor-core score tiles. We then add one carefully scoped extension motivated by later versions: a split-KV sequence-parallel path inspired by an important forward-only implementation idea in FlashAttention-2. Our goal is not to reproduce the full production codebase; rather, it is to isolate which ideas are necessary to outperform naive attention on modern CUDA hardware and to measure how much additional benefit is provided by the FA2-style modification once the FlashAttention-1 core is already in place. The resulting benchmark suite compares a naive mixed-precision baseline, a simplified FlashAttention-1 kernel, a FlashAttention-2-inspired forward extension, ablations of the most important FA1 design decisions, and two official baselines: FlashAttention-1 and FlashAttention-2.
+FlashAttention is the standard exact attention kernel used in modern large language models because it substantially reduces high-bandwidth-memory traffic while preserving exact attention outputs. In this project, we implement a compact CUDA C++ attention benchmark suite centered on the most important broad ideas from FlashAttention-1: shared-memory tiling, online softmax, fused score/softmax/value computation, mixed precision, and tensor-core score tiles. We then add one carefully scoped extension motivated by later versions: a split-KV sequence-parallel path inspired by an important forward-only implementation idea in FlashAttention-2. Our goal is not to reproduce the full production codebase; rather, it is to evaluate how much of FlashAttention's forward-pass advantage can be captured by a compact kernel that preserves the main FA1 design choices, and then to measure how much additional benefit is provided by the FA2-style modification once that FA1 core is already in place. The resulting benchmark suite compares a naive mixed-precision baseline, a simplified FlashAttention-1 kernel, a FlashAttention-2-inspired forward extension, ablations of the most important FA1 design decisions, and two official baselines: FlashAttention-1 and FlashAttention-2.
 \end{abstract}
 
 \section{Introduction and Motivation}
@@ -120,19 +120,19 @@ These are the parts of FlashAttention that are both conceptually central and bro
             \begin{minipage}[t]{0.46\linewidth}
                 \centering
                 \textbf{FlashAttention-style execution}\\[3pt]
-                \fbox{\parbox{0.8\linewidth}{\centering Stage small $Q/K/V$ tiles in SRAM}}\\[3pt]
+                \fbox{\parbox{0.8\linewidth}{\centering Stage one query block and one KV block in SRAM}}\\[3pt]
                 $\Downarrow$\\[3pt]
-                \fbox{\parbox{0.8\linewidth}{\centering Compute score tile}}\\[3pt]
+                \fbox{\parbox{0.8\linewidth}{\centering Compute score subtiles}}\\[3pt]
                 $\Downarrow$\\[3pt]
                 \fbox{\parbox{0.8\linewidth}{\centering Update online softmax statistics}}\\[3pt]
                 $\Downarrow$\\[3pt]
-                \fbox{\parbox{0.8\linewidth}{\centering Accumulate output tile immediately}}\\[3pt]
+                \fbox{\parbox{0.8\linewidth}{\centering Accumulate the output block immediately}}\\[3pt]
                 $\Downarrow$\\[3pt]
                 \fbox{\parbox{0.8\linewidth}{\centering Write only final $O$}}
             \end{minipage}
         }
     }
-    \caption{The core memory-efficiency idea of FlashAttention. The naive implementation repeatedly touches the full score matrix in high-bandwidth memory, whereas FlashAttention keeps only tiles and per-row running statistics live at any moment.}
+    \caption{The core memory-efficiency idea of FlashAttention. The naive implementation repeatedly touches the full score matrix in high-bandwidth memory, whereas FlashAttention keeps only the currently active query/KV block and per-row running statistics live at any moment.}
     \label{fig:memory_view}
 \end{figure}
 
@@ -141,20 +141,20 @@ These are the parts of FlashAttention that are both conceptually central and bro
 Our baseline uses the usual three-stage attention decomposition: compute $QK^\top$, apply row-wise softmax, and finally multiply by $V$. The implementation uses FP16 inputs so that it is compared against the project kernels under similar data-type assumptions, but it still materializes the full score matrix in FP32. This baseline therefore preserves exact attention math while exposing the major memory-system weakness that FlashAttention is designed to remove.
 
 \subsection{Simplified FlashAttention-1 kernel}
-The main project kernel is our simplified FlashAttention-1 implementation. It stages query, key, and value tiles in shared memory, computes score tiles with WMMA tensor-core fragments, and maintains per-row running softmax statistics across KV tiles. Let $m_i$ and $\ell_i$ denote the running row maximum and running normalization term for query row $i$. For a new KV tile producing scores $s_{ij}$, the online recurrence is
+The main project kernel is our simplified FlashAttention-1 implementation. Each thread block owns a $64$-row query block composed of four warp-local $16$-row query tiles. For each outer iteration, the kernel stages the current query block together with a $64$-key / $64$-value block in shared memory, computes the score subtiles with WMMA tensor-core fragments, and maintains per-row running softmax statistics across KV blocks. Let $m_i$ and $\ell_i$ denote the running row maximum and running normalization term for query row $i$. For a new KV block producing scores $s_{ij}$, the online recurrence is
 \begin{align}
 m_i' &= \max\left(m_i, \max_j s_{ij}\right), \\
 \ell_i' &= e^{m_i - m_i'} \ell_i + \sum_j e^{s_{ij} - m_i'}, \\
 o_i' &= e^{m_i - m_i'} o_i + \sum_j e^{s_{ij} - m_i'} V_j .
 \end{align}
-After the final tile, each output row is normalized by $\ell_i'$. This is the main algorithmic reason FlashAttention can remain exact while avoiding the full $N \times N$ attention matrix \citep{dao2022flashattention}.
+After the final KV block, each output row is normalized by $\ell_i'$. This is the main algorithmic reason FlashAttention can remain exact while avoiding the full $N \times N$ attention matrix \citep{dao2022flashattention}.
 
 Our kernel is intentionally smaller than the official implementation, but it preserves the core forward-pass structure:
 \begin{itemize}
-    \item query, key, and value tiles are staged in shared memory;
-    \item the score tile is accumulated with tensor-core matrix-multiply-accumulate operations;
+    \item a query block and the current key/value block are staged in shared memory;
+    \item the score computation is built from WMMA tensor-core subtiles inside the wider staged KV block;
     \item softmax normalization and value accumulation are fused into the same kernel; and
-    \item only per-row statistics and the final output are written to global memory.
+    \item only per-row running state and the final output are kept live between KV blocks, without materializing the full score matrix.
 \end{itemize}
 
 \begin{figure}[H]
@@ -163,16 +163,16 @@ Our kernel is intentionally smaller than the official implementation, but it pre
         \parbox{0.94\linewidth}{
             \centering
             \small
-            \textbf{Tile-by-Tile Execution for One Query Block}\\[5pt]
-            \fbox{\parbox{0.18\linewidth}{\centering Query tile\\$Q_i$}} \hfill
-            \fbox{\parbox{0.18\linewidth}{\centering Key tile\\$K_j$}} \hfill
-            \fbox{\parbox{0.18\linewidth}{\centering Value tile\\$V_j$}} \hfill
+            \textbf{Block-by-Block Execution for One Query Block}\\[5pt]
+            \fbox{\parbox{0.18\linewidth}{\centering Query block\\$Q_i$}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering Key block\\$K_j$}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering Value block\\$V_j$}} \hfill
             \fbox{\parbox{0.22\linewidth}{\centering Running row state\\$(m_i,\ell_i,o_i)$}}\\[6pt]
             $\Downarrow$\\[6pt]
-            \fbox{\parbox{0.78\linewidth}{\centering Repeat over KV tiles: WMMA score tile $\rightarrow$ online softmax update $\rightarrow$ output accumulation}}
+            \fbox{\parbox{0.78\linewidth}{\centering Repeat over KV blocks: WMMA score subtiles $\rightarrow$ online softmax update $\rightarrow$ output accumulation}}
         }
     }
-    \caption{Conceptual per-tile execution order. The output row is built incrementally as KV tiles are processed, which eliminates the need to materialize the full attention matrix.}
+    \caption{Conceptual per-block execution order. The output row is built incrementally as KV blocks are processed, which eliminates the need to materialize the full attention matrix.}
     \label{fig:tile_flow}
 \end{figure}
 
@@ -185,7 +185,7 @@ Our kernel is intentionally smaller than the official implementation, but it pre
             \textbf{Kernel Flow Used in This Project}\\[4pt]
             \fbox{\parbox{0.19\linewidth}{\centering Naive\\Materialize $QK^\top$}} \hfill
             $\Longrightarrow$ \hfill
-            \fbox{\parbox{0.19\linewidth}{\centering Simplified FA1\\Tile + online softmax}} \hfill
+            \fbox{\parbox{0.19\linewidth}{\centering Simplified FA1\\Block + online softmax}} \hfill
             $\Longrightarrow$ \hfill
             \fbox{\parbox{0.24\linewidth}{\centering FA2-inspired\\Split-KV combine}}
         }
@@ -195,7 +195,7 @@ Our kernel is intentionally smaller than the official implementation, but it pre
 \end{figure}
 
 \subsection{FA2-inspired extension: split-KV sequence parallelism}
-The most important portable later-version idea we add is a split-KV forward path. Rather than assigning one query tile to a single block that scans the full KV range, we partition the KV tiles across multiple blocks. Each block computes partial statistics for a subset of the KV tiles assigned to the same query tile, producing partial maxima $m_i^{(r)}$, partial normalizers $\ell_i^{(r)}$, and partial output accumulators $o_i^{(r)}$ for split $r$. These are then combined exactly with
+The most important portable later-version idea we add is a split-KV forward path. Rather than assigning the full KV range for one query block to a single block, we partition the KV blocks across multiple blocks. Each block computes partial statistics for a subset of the KV blocks assigned to the same query block, producing partial maxima $m_i^{(r)}$, partial normalizers $\ell_i^{(r)}$, and partial output accumulators $o_i^{(r)}$ for split $r$. These are then combined exactly with
 \begin{align}
 m_i &= \max_r m_i^{(r)}, \\
 \ell_i &= \sum_r \ell_i^{(r)} e^{m_i^{(r)} - m_i}, \\
@@ -206,8 +206,8 @@ This extension is motivated by the upstream split-KV path and its \texttt{num\_s
 \subsection{Ablations}
 We include two ablation kernels so that the report can answer which FA1 ingredients matter most.
 \begin{itemize}
-    \item \textbf{No online softmax.} This kernel keeps tiling and tensor-core score tiles, but replaces the online recurrence with a two-pass computation.
-    \item \textbf{No SRAM tiling.} This kernel keeps the exact online-softmax logic but loads key/value rows directly from global memory instead of shared-memory tiling.
+    \item \textbf{No online softmax.} This kernel keeps the same block structure, staged query/KV blocks, and tensor-core score subtiles, but replaces the online recurrence with a two-pass computation.
+    \item \textbf{No SRAM tiling.} This kernel keeps the same outer block structure and exact online-softmax logic, but loads key/value rows directly from global memory instead of staging K/V blocks in shared memory.
 \end{itemize}
 The ablations are important because they let us isolate whether the main gain comes from the online recurrence, from the memory-hierarchy reorganization, or from both together.
 
@@ -221,7 +221,7 @@ The ablations are important because they let us isolate whether the main gain co
         Method & Upstream concept tested & Exact? & Primary question answered \\
         \midrule
         Naive & Standard attention decomposition & yes & What is the baseline cost when the score matrix is fully materialized? \\
-        Simplified FA1 & Tiling + online softmax + fusion & yes & How much of the main FlashAttention win appears once the core FA1 ideas are implemented? \\
+        Simplified FA1 & Tiling + online softmax + fusion & yes & How much of the main FlashAttention behavior appears once the core FA1 ideas are implemented? \\
         FA2-inspired & Split-KV sequence parallelism & yes & Does KV-range partitioning help after the FA1 core is already in place? \\
         Ablations & Removal of one FA1 ingredient at a time & yes & Which FA1 ingredients are actually carrying the performance gain? \\
         \bottomrule
@@ -237,9 +237,9 @@ Two implementation choices are especially important for interpreting the benchma
 The simplified FA1 kernel and the FA2-inspired kernel also share most of the same surrounding choices: both perform exact causal attention, both keep the output accumulation in FP32, and both use the same correctness reference in the benchmark binary. This is important because it means the FA1-versus-FA2 comparison is not confounded by datatype changes, approximation, or a different masking convention. The intended interpretation is therefore narrow and clean: if FA2-inspired split-KV helps, it should help because of additional sequence-level parallelism and altered work partitioning, not because the kernels are doing different mathematical tasks.
 
 \subsection{Kernel layout}
-Our CUDA implementation uses a small tile size of $16 \times 16$, which aligns naturally with WMMA fragments and keeps the kernels easy to reason about. For the simplified FA1 kernel, one query tile is assigned to a block. The query tile, a transposed key tile, and the corresponding value tile are staged in shared memory; the score tile is formed with tensor cores; and each query row maintains a running maximum, running normalization constant, and running output vector in FP32. Once all KV tiles have been processed, the output accumulator is normalized and written back to global memory.
+Our CUDA implementation uses $16 \times 16$ WMMA fragments, but the full thread-block work unit is larger: each block processes a $64$-row query block and iterates over the sequence in $64$-key / $64$-value blocks. The query block and the current K/V block are staged in shared memory, while each active query row maintains its running maximum, running normalization constant, and running output vector in FP32 across KV-block iterations. Once all KV blocks have been processed, the output accumulator is normalized and written back to global memory.
 
-The FA2-inspired kernel keeps the same tile-local computation but changes how the KV range is traversed. Instead of assigning the full KV range to one block, it partitions the KV tiles into splits. Each split produces partial $m$, $\ell$, and $o$ values, and a second kernel combines them exactly. This split/combine structure is the main implementation difference between our FA1 and FA2-inspired forward paths.
+The FA2-inspired kernel keeps the same intra-block computation but changes how the KV range is traversed. Instead of assigning the full KV range to one block, it partitions the KV blocks into splits. Each split produces partial $m$, $\ell$, and $o$ values, and a second kernel combines them exactly. This split/combine structure is the main implementation difference between our FA1 and FA2-inspired forward paths.
 
 \begin{figure}[H]
     \centering
@@ -248,14 +248,14 @@ The FA2-inspired kernel keeps the same tile-local computation but changes how th
             \centering
             \small
             \textbf{Shared-Memory View of the Simplified FA1 Kernel}\\[4pt]
-            \fbox{\parbox{0.16\linewidth}{\centering Q tile\\shared memory}} \hfill
-            \fbox{\parbox{0.16\linewidth}{\centering K$^\top$ tile\\shared memory}} \hfill
-            \fbox{\parbox{0.16\linewidth}{\centering V tile\\shared memory}} \hfill
-            \fbox{\parbox{0.18\linewidth}{\centering score tile\\WMMA}} \hfill
+            \fbox{\parbox{0.16\linewidth}{\centering Q block\\shared memory}} \hfill
+            \fbox{\parbox{0.16\linewidth}{\centering K$^\top$ block\\shared memory}} \hfill
+            \fbox{\parbox{0.16\linewidth}{\centering V block\\shared memory}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering score subtiles\\WMMA}} \hfill
             \fbox{\parbox{0.18\linewidth}{\centering running $(m,\ell,o)$\\FP32 state}}
         }
     }
-    \caption{Conceptual shared-memory organization for the simplified FA1 kernel. The key idea is that only the current tiles and row-wise running state must remain resident, rather than the full score matrix.}
+    \caption{Conceptual on-chip organization for the simplified FA1 kernel. The key idea is that only the current query/KV blocks and row-wise running state must remain resident, rather than the full score matrix.}
     \label{fig:smem_view}
 \end{figure}
 
@@ -303,10 +303,10 @@ The benchmark uses one fixed batch/head configuration and varies only sequence l
 
 The evaluation reports four classes of comparisons.
 \begin{enumerate}
-    \item \textbf{Naive vs.\ simplified FA1.} This isolates the main FlashAttention-1 win.
+    \item \textbf{Naive vs.\ simplified FA1.} This isolates the main FlashAttention-1 design choices.
     \item \textbf{Simplified FA1 vs.\ FA2-inspired.} This isolates split-KV sequence parallelism.
     \item \textbf{Project kernels vs.\ official FlashAttention-1 and FlashAttention-2.} This measures the gap between the educational implementation and the production kernels from both generations.
-    \item \textbf{FA1 ablations.} These isolate which of the core FA1 ingredients are necessary for the speedup.
+    \item \textbf{FA1 ablations.} These isolate which of the core FA1 ingredients are most important in practice.
 \end{enumerate}
 
 The official baselines serve two distinct roles in this study. Official FlashAttention-1 anchors the comparison to the original IO-aware reformulation, while official FlashAttention-2 reflects the more mature forward kernel family that is widely used on modern NVIDIA GPUs.
@@ -380,10 +380,10 @@ The official baselines serve two distinct roles in this study. Official FlashAtt
     \end{tabular}
 \end{table}
 
-Taken together, Figure~\ref{fig:gpuplots} and Tables~\ref{tab:runtime}--\ref{tab:ablation} answer complementary questions. The runtime table gives the most direct method-to-method comparison at representative sequence lengths, the speedup table makes the incremental effect of the FA1 core and the FA2-inspired extension easier to read relative to the naive baseline, and the ablation table identifies which FA1 ingredients are indispensable once the benchmark moves into the long-sequence regime.
+Taken together, Figure~\ref{fig:gpuplots} and Tables~\ref{tab:runtime}--\ref{tab:ablation} answer complementary questions. The runtime table gives the most direct method-to-method comparison at representative sequence lengths, the speedup table makes the effect of the FA1 core and the FA2-inspired extension easier to read relative to the naive baseline, and the ablation table identifies which FA1 ingredients matter most once the benchmark moves into the long-sequence regime.
 
 \section{Discussion}
-The evaluation is organized so that each comparison answers a specific systems question. The most important comparison is naive attention versus simplified FA1, since that isolates the gain from IO-aware tiling, online softmax, and score-matrix elimination. The FA1-versus-FA2 comparison is intentionally narrower: it asks whether one specific forward-only idea from FA2---split-KV sequence parallelism with an exact combine step---still contributes additional benefit once the FA1 core is already in place. Comparing against official FlashAttention-1 and FlashAttention-2 then provides an external reference frame for how far a compact implementation can approach the production kernels from those two generations.
+The evaluation is organized so that each comparison answers a specific systems question. The most important comparison is naive attention versus simplified FA1, since that isolates the practical effect of IO-aware tiling, online softmax, and score-matrix elimination in our compact kernel. The FA1-versus-FA2 comparison is intentionally narrower: it asks whether one specific forward-only idea from FA2---split-KV sequence parallelism with an exact combine step---contributes additional benefit once the FA1 core is already in place. Comparing against official FlashAttention-1 and FlashAttention-2 then provides an external reference frame for how far a compact implementation can approach the production kernels from those two generations.
 
 \section{Limitations}
 This project still has several deliberate limitations, all of which should be acknowledged in the final presentation of results.
@@ -394,10 +394,10 @@ This project still has several deliberate limitations, all of which should be ac
     \item The FA2-inspired addition is intentionally narrow and should not be presented as a full reproduction of FA2.
     \item The comparison against the official FA1 and FA2 packages is numerically meaningful and practically useful, but it is not an apples-to-apples feature comparison.
 \end{itemize}
-These limitations are acceptable for our stated project goal because that goal is to identify the most important ideas behind FlashAttention's forward-pass speedups, not to reproduce the entire production stack.
+These limitations are acceptable for our stated project goal because that goal is to identify and benchmark the most important ideas behind FlashAttention's forward-pass behavior, not to reproduce the entire production stack.
 
 \section{Conclusion}
-This project studies how much of FlashAttention's practical forward-pass advantage can be captured in a compact CUDA C++ implementation. The main kernel preserves the central FlashAttention-1 design decisions: shared-memory tiling, online softmax, fusion, mixed precision, and tensor-core score computation. The additional FA2-inspired split-KV path then tests whether sequence-parallel work partitioning offers a further gain once the FA1 core is already in place. Taken together, these kernels provide a focused benchmark suite for understanding which algorithmic and hardware-conscious ideas are most responsible for FlashAttention's speedup over naive exact attention.
+This project studies how much of FlashAttention's practical forward-pass advantage can be captured in a compact CUDA C++ implementation. The main kernel preserves the central FlashAttention-1 design decisions: shared-memory tiling, online softmax, fusion, mixed precision, and tensor-core score computation. The additional FA2-inspired split-KV path then tests whether sequence-parallel work partitioning offers a further gain once the FA1 core is already in place. Taken together, these kernels provide a focused benchmark suite for understanding which algorithmic and hardware-conscious ideas matter most for exact attention performance on modern GPUs.
 
 \clearpage
 
