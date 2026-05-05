@@ -21,7 +21,7 @@
         }                                                                       \
     } while (0)
 
-inline int cdiv(int a, int b) { return (a + b - 1) / b; }
+__host__ __device__ inline int cdiv(int a, int b) { return (a + b - 1) / b; }
 
 inline std::unordered_map<void*, size_t>& project_cuda_allocations() {
     static std::unordered_map<void*, size_t> allocations;
