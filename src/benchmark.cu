@@ -71,8 +71,13 @@ size_t measure_kernel_peak_memory(
     int N,
     int d,
     float scale,
-    bool causal
+    bool causal,
+    int warmup_iters = 10
 ) {
+    for (int i = 0; i < warmup_iters; i++) {
+        fn(d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal);
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
     project_cuda_memory_tracking_reset_peak();
     fn(d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal);
     CUDA_CHECK(cudaDeviceSynchronize());

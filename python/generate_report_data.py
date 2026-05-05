@@ -8,7 +8,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "results"
-REPORT_GENERATED_DIR = REPO_ROOT / "report" / "generated"
 
 RUNTIME_METHODS = [
     ("Naive", "Naive"),
@@ -130,13 +129,13 @@ def make_ablation_rows(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
 def make_table_macro_file(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
     return "\n".join(
         [
-            r"\renewcommand{\runtimeTableRows}{%",
+            r"\newcommand{\runtimeTableRows}{%",
             make_runtime_rows(lookup).rstrip(),
             "}",
-            r"\renewcommand{\speedupTableRows}{%",
+            r"\newcommand{\speedupTableRows}{%",
             make_speedup_rows(lookup).rstrip(),
             "}",
-            r"\renewcommand{\ablationTableRows}{%",
+            r"\newcommand{\ablationTableRows}{%",
             make_ablation_rows(lookup).rstrip(),
             "}",
             "",
@@ -144,16 +143,16 @@ def make_table_macro_file(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
     )
 
 
-def write_generated_file(name: str, contents: str) -> None:
-    REPORT_GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    (REPORT_GENERATED_DIR / name).write_text(contents)
+def write_results_file(name: str, contents: str) -> None:
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    (RESULTS_DIR / name).write_text(contents)
 
 
 def main() -> None:
     rows = load_rows()
     lookup = build_lookup(rows)
-    write_generated_file("table_rows.tex", make_table_macro_file(lookup))
-    print(f"Wrote generated report tables to {REPORT_GENERATED_DIR}")
+    write_results_file("table_rows.tex", make_table_macro_file(lookup))
+    print(f"Wrote report table data to {RESULTS_DIR / 'table_rows.tex'}")
 
 
 if __name__ == "__main__":

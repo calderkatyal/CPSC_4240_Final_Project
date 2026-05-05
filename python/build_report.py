@@ -15,6 +15,7 @@ RESULTS_DIR = REPO_ROOT / "results"
 
 REQUIRED_RESULT_FILES = [
     RESULTS_DIR / "gpu_comparison_results.csv",
+    RESULTS_DIR / "table_rows.tex",
     RESULTS_DIR / "gpu_comparison_runtime.pdf",
     RESULTS_DIR / "gpu_comparison_speedup.pdf",
     RESULTS_DIR / "gpu_comparison_memory.pdf",
@@ -40,7 +41,6 @@ def main() -> None:
         )
 
     python = sys.executable
-    run_step([python, str(PYTHON_DIR / "generate_report_data.py")])
     run_step(
         ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "report.tex"],
         cwd=REPORT_DIR,

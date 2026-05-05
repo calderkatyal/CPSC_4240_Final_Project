@@ -68,7 +68,7 @@ def benchmark_torch_callable(fn, warmup: int = 10, bench_iters: int = 50) -> flo
     return start.elapsed_time(stop) / bench_iters
 
 
-def measure_peak_memory_bytes(fn, warmup: int = 3) -> int:
+def measure_peak_memory_bytes(fn, warmup: int = 10) -> int:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()

@@ -130,6 +130,7 @@ This produces:
 
 - `results/benchmark_results.csv`
 - `results/gpu_comparison_results.csv`
+- `results/table_rows.tex`
 
 ### 10. Generate plots
 
@@ -142,9 +143,7 @@ This writes the runtime, speedup, memory, and ablation figures into `results/`.
 ### 11. Rebuild the report
 
 ```bash
-cd report
 python python/build_report.py
-cd ..
 ```
 
 The rebuilt PDF will be available at:
@@ -152,5 +151,47 @@ The rebuilt PDF will be available at:
 - `report/report.pdf`
 
 This build expects the merged comparison outputs in `results/gpu_comparison_results.csv`
-and `results/gpu_comparison_*.pdf`; it does not fall back to project-only report data.
-It reads those files but does not rewrite anything inside `results/`.
+plus `results/table_rows.tex` and `results/gpu_comparison_*.pdf`; it does not
+fall back to project-only report data. It reads those files but does not rewrite
+anything inside `results/`.
+
+## Resume a Later Cluster Session
+
+If you already completed the one-time setup in an earlier session (packages
+installed, virtual environment created, official FA1 source cloned, and the FA2
+wheel installed), you do not need to repeat the install steps above.
+
+From a fresh shell on the cluster, run:
+
+```bash
+cd /path/to/CPSC_4240_Final_Project
+
+module purge
+module load GCC/12.2.0
+module load CUDA/12.1.1
+module load Python/3.10.8-GCCcore-12.2.0
+
+source venv/bin/activate
+
+export CC=$(which gcc)
+export CXX=$(which g++)
+export CUDAHOSTCXX=$(which g++)
+```
+
+Then rerun the full benchmark/report pipeline:
+
+```bash
+python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
+python python/benchmark_official_flash_attn.py --version fa2
+make benchmark
+python python/run_benchmarks.py
+python python/plot_results.py
+python python/build_report.py
+```
+
+That sequence assumes all dependencies are already installed and produces:
+
+- refreshed benchmark CSVs in `results/`
+- refreshed plot PDFs in `results/`
+- refreshed table macros in `results/table_rows.tex`
+- refreshed report PDF at `report/report.pdf`

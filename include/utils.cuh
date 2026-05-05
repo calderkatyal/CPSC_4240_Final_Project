@@ -78,6 +78,10 @@ using project_in_t = half;
 using project_out_t = float;
 
 constexpr int PROJECT_TILE = 16;
+constexpr int PROJECT_WARP_SIZE = 32;
+constexpr int PROJECT_Q_WARPS = 4;
+constexpr int PROJECT_BLOCK_M = PROJECT_TILE * PROJECT_Q_WARPS;
+constexpr int PROJECT_THREADS = PROJECT_WARP_SIZE * PROJECT_Q_WARPS;
 constexpr int PROJECT_MAX_D = 128;
 
 inline void check_supported_head_dim(int d) {

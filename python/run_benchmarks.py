@@ -70,6 +70,8 @@ def merge_results() -> list[dict]:
 def main() -> None:
     run_project_benchmark_binary()
     merge_results()
+    print("Generating LaTeX table data from merged results...")
+    subprocess.run([sys.executable, str(ROOT_DIR / "python" / "generate_report_data.py")], cwd=ROOT_DIR, check=True)
 
 
 if __name__ == "__main__":

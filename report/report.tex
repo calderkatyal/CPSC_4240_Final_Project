@@ -20,41 +20,7 @@
 \setlength{\abovecaptionskip}{4pt}
 
 \newcommand{\blankcell}{\textemdash}
-\newcommand{\runtimeTableRows}{%
-Naive & \blankcell & \blankcell & \blankcell & \blankcell \\%
-Simplified FA1 & \blankcell & \blankcell & \blankcell & \blankcell \\%
-FA2-inspired extension & \blankcell & \blankcell & \blankcell & \blankcell \\%
-Official FlashAttention-1 & \blankcell & \blankcell & \blankcell & \blankcell \\%
-Official FlashAttention-2 & \blankcell & \blankcell & \blankcell & \blankcell \\%
-}
-\newcommand{\speedupTableRows}{%
-Simplified FA1 & \blankcell & \blankcell & \blankcell & \blankcell \\%
-FA2-inspired extension & \blankcell & \blankcell & \blankcell & \blankcell \\%
-Official FlashAttention-1 & \blankcell & \blankcell & \blankcell & \blankcell \\%
-Official FlashAttention-2 & \blankcell & \blankcell & \blankcell & \blankcell \\%
-}
-\newcommand{\ablationTableRows}{%
-Simplified FA1 & \blankcell & \blankcell & \blankcell \\%
-Ablation: no online softmax & \blankcell & \blankcell & \blankcell \\%
-Ablation: no SRAM tiling & \blankcell & \blankcell & \blankcell \\%
-}
-\InputIfFileExists{generated/table_rows.tex}{}{}
-\newcommand{\resultplaceholder}[2]{
-    \fbox{
-        \parbox[c][#2][c]{0.95\linewidth}{
-            \centering
-            \textbf{#1}
-        }
-    }
-}
-
-\newcommand{\maybeplot}[2]{
-    \IfFileExists{#1}{
-        \includegraphics[width=\linewidth]{#1}
-    }{
-        \resultplaceholder{#2}{1.55in}
-    }
-}
+\input{../results/table_rows.tex}
 
 \title{Implementing Concise, Optimized Flash Attention in CUDA C++}
 
@@ -351,24 +317,24 @@ The official baselines serve two distinct roles in this study. Official FlashAtt
     \centering
     \begin{subfigure}[t]{0.48\columnwidth}
         \centering
-        \maybeplot{../results/gpu_comparison_runtime.pdf}{Runtime scaling plot}
+        \includegraphics[width=\linewidth]{../results/gpu_comparison_runtime.pdf}
     \end{subfigure}\hfill
     \begin{subfigure}[t]{0.48\columnwidth}
         \centering
-        \maybeplot{../results/gpu_comparison_speedup.pdf}{Speedup-vs-naive plot}
+        \includegraphics[width=\linewidth]{../results/gpu_comparison_speedup.pdf}
     \end{subfigure}
 
     \vspace{0.12in}
 
     \begin{subfigure}[t]{0.48\columnwidth}
         \centering
-        \maybeplot{../results/gpu_comparison_memory.pdf}{Memory-scaling plot}
+        \includegraphics[width=\linewidth]{../results/gpu_comparison_memory.pdf}
     \end{subfigure}\hfill
     \begin{subfigure}[t]{0.48\columnwidth}
         \centering
-        \maybeplot{../results/gpu_comparison_ablation.pdf}{Ablation plot}
+        \includegraphics[width=\linewidth]{../results/gpu_comparison_ablation.pdf}
     \end{subfigure}
-    \caption{Runtime, speedup, memory, and ablation views for the benchmark suite, including both official FlashAttention baselines when those CSVs are present.}
+    \caption{Runtime, speedup, memory, and ablation views for the merged benchmark suite, including both official FlashAttention baselines.}
     \label{fig:gpuplots}
 \end{figure}
 
