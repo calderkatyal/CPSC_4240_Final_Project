@@ -167,6 +167,12 @@ static __global__ void flash_attention_core_kernel(
     int d_start = col_half * half_d;
 
     int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
+    if (causal) {
+        int q_end = q_block_start + PROJECT_BLOCK_M - 1;
+        if (q_end >= N) q_end = N - 1;
+        int causal_limit = cdiv(q_end + 1, PROJECT_BLOCK_N);
+        if (causal_limit < num_kv_tiles) num_kv_tiles = causal_limit;
+    }
     for (int kv_tile = 0; kv_tile < num_kv_tiles; kv_tile++) {
         int kv_start = kv_tile * PROJECT_BLOCK_N;
 
