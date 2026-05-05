@@ -143,11 +143,14 @@ This writes the runtime, speedup, memory, and ablation figures into `results/`.
 
 ```bash
 cd report
-pdflatex -interaction=nonstopmode -halt-on-error report.tex
-pdflatex -interaction=nonstopmode -halt-on-error report.tex
+python python/build_report.py
 cd ..
 ```
 
 The rebuilt PDF will be available at:
 
 - `report/report.pdf`
+
+This build expects the merged comparison outputs in `results/gpu_comparison_results.csv`
+and `results/gpu_comparison_*.pdf`; it does not fall back to project-only report data.
+It reads those files but does not rewrite anything inside `results/`.
