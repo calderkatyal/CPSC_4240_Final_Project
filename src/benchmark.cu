@@ -33,8 +33,8 @@ float benchmark_kernel(
     int d,
     float scale,
     bool causal,
-    int warmup_iters = 3,
-    int bench_iters = 10
+    int warmup_iters = 10,
+    int bench_iters = 50
 ) {
     for (int i = 0; i < warmup_iters; i++) {
         fn(d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal);
@@ -58,6 +58,25 @@ float benchmark_kernel(
     CUDA_CHECK(cudaEventDestroy(stop));
 
     return ms / bench_iters;
+}
+
+size_t measure_kernel_peak_memory(
+    ProjectKernelFn fn,
+    const project_in_t* d_Q,
+    const project_in_t* d_K,
+    const project_in_t* d_V,
+    project_out_t* d_O,
+    int B,
+    int H,
+    int N,
+    int d,
+    float scale,
+    bool causal
+) {
+    project_cuda_memory_tracking_reset_peak();
+    fn(d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return project_cuda_memory_tracking_peak_bytes();
 }
 
 void run_correctness_check(
@@ -123,19 +142,19 @@ int main(int argc, char** argv) {
     struct MethodEntry {
         const char* name;
         ProjectKernelFn fn;
-        size_t extra_mem;
     };
 
     MethodEntry methods[] = {
-        {"Naive", naive_attention, 0},
-        {"Simplified FA1", flash_attention_v1, 0},
-        {"FA2-inspired extension", flash_attention_v2, 0},
-        {"Ablation: no online softmax", flash_attention_v1_no_online_softmax, 0},
-        {"Ablation: no SRAM tiling", flash_attention_v1_no_tiling, 0},
+        {"Naive", naive_attention},
+        {"Simplified FA1", flash_attention_v1},
+        {"FA2-inspired extension", flash_attention_v2},
+        {"Ablation: no online softmax", flash_attention_v1_no_online_softmax},
+        {"Ablation: no SRAM tiling", flash_attention_v1_no_tiling},
     };
 
     for (int N : seq_lens) {
         printf("--- N = %d (B=%d, H=%d, d=%d, causal=%d) ---\n", N, B, H, d, causal);
+        project_cuda_memory_tracking_clear();
 
         size_t total = (size_t)B * H * N * d;
         size_t input_bytes = total * sizeof(project_in_t);
@@ -164,10 +183,10 @@ int main(int argc, char** argv) {
         project_in_t* d_V = nullptr;
         project_out_t* d_O = nullptr;
 
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_Q), input_bytes));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_K), input_bytes));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_V), input_bytes));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_O), output_bytes));
+        CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&d_Q), input_bytes));
+        CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&d_K), input_bytes));
+        CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&d_V), input_bytes));
+        CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&d_O), output_bytes));
 
         CUDA_CHECK(cudaMemcpy(d_Q, h_Q.data(), input_bytes, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_K, h_K.data(), input_bytes, cudaMemcpyHostToDevice));
@@ -183,6 +202,9 @@ int main(int argc, char** argv) {
 
         printf("Benchmarks:\n");
         for (const auto& method : methods) {
+            size_t mem = measure_kernel_peak_memory(
+                method.fn, d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
+            );
             float ms = benchmark_kernel(
                 method.fn, d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
             );
@@ -194,18 +216,6 @@ int main(int argc, char** argv) {
             CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, output_bytes, cudaMemcpyDeviceToHost));
             float err = max_abs_diff(h_ref.data(), h_O.data(), (int)total);
 
-            size_t mem = 3 * input_bytes + output_bytes + method.extra_mem;
-            if (std::string(method.name) == "Naive") {
-                mem += (size_t)B * H * N * N * sizeof(float);
-            }
-            if (std::string(method.name) == "FA2-inspired extension") {
-                int nsplits = project_flash::choose_splitkv_splits<false>(B, H, N);
-                mem += project_flash::splitkv_workspace_bytes<false>(B, H, N, d, nsplits);
-            }
-            if (std::string(method.name) == "Ablation: no online softmax") {
-                mem += (size_t)B * H * N * sizeof(float);
-            }
-
             printf("  %-35s %8.3f ms  mem=%zu bytes  err=%.2e\n",
                    method.name, ms, mem, err);
             fprintf(csv, "%s,%d,%.4f,%zu,%.6e,%d\n",
@@ -214,10 +224,10 @@ int main(int argc, char** argv) {
 
         printf("\n");
 
-        CUDA_CHECK(cudaFree(d_Q));
-        CUDA_CHECK(cudaFree(d_K));
-        CUDA_CHECK(cudaFree(d_V));
-        CUDA_CHECK(cudaFree(d_O));
+        CUDA_CHECK(tracked_cuda_free(d_Q));
+        CUDA_CHECK(tracked_cuda_free(d_K));
+        CUDA_CHECK(tracked_cuda_free(d_V));
+        CUDA_CHECK(tracked_cuda_free(d_O));
     }
 
     fclose(csv);

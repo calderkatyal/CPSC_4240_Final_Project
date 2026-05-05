@@ -230,7 +230,7 @@ void flash_attention_v1_no_online_softmax(
     int BH = B * H;
     int num_q_tiles = cdiv(N, PROJECT_TILE);
     float* d_row_max = nullptr;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_row_max), (size_t)BH * N * sizeof(float)));
+    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&d_row_max), (size_t)BH * N * sizeof(float)));
 
     size_t pass1_smem = 2 * PROJECT_TILE * d * sizeof(project_in_t);
     pass1_smem += PROJECT_TILE * PROJECT_TILE * sizeof(float);
@@ -252,7 +252,7 @@ void flash_attention_v1_no_online_softmax(
     );
     CUDA_CHECK(cudaGetLastError());
 
-    CUDA_CHECK(cudaFree(d_row_max));
+    CUDA_CHECK(tracked_cuda_free(d_row_max));
 }
 
 void flash_attention_v1_no_tiling(

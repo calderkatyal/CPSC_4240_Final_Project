@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import sys
 from pathlib import Path
 
@@ -65,6 +66,19 @@ def benchmark_torch_callable(fn, warmup: int = 10, bench_iters: int = 50) -> flo
     stop.record()
     torch.cuda.synchronize()
     return start.elapsed_time(stop) / bench_iters
+
+
+def measure_peak_memory_bytes(fn, warmup: int = 3) -> int:
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    fn()
+    torch.cuda.synchronize()
+    return int(torch.cuda.max_memory_allocated())
 
 
 def get_fa1_callable():
@@ -136,19 +150,19 @@ def run_benchmarks(version: str, source_dir: str | None) -> list[dict]:
             ).permute(0, 2, 1, 3)
             err = (out.float() - ref).abs().max().item()
             t_ms = benchmark_torch_callable(lambda: flash_fn(q, k, v, causal=causal))
+            mem_bytes = measure_peak_memory_bytes(lambda: flash_fn(q, k, v, causal=causal))
 
-        io_bytes = 4 * B * N * H * d * torch.finfo(dtype).bits // 8
         rows.append(
             {
                 "method": label,
                 "seq_len": N,
                 "time_ms": f"{t_ms:.4f}",
-                "memory_bytes": io_bytes,
+                "memory_bytes": mem_bytes,
                 "max_error": f"{err:.6e}",
                 "causal": 1,
             }
         )
-        print(f"  N={N}: {t_ms:.4f} ms, max error={err:.3e}")
+        print(f"  N={N}: {t_ms:.4f} ms, peak memory={mem_bytes} bytes, max error={err:.3e}")
 
     write_rows(out_path, rows)
     print(f"Wrote {out_path}")

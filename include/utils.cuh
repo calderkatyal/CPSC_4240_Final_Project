@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <cmath>
 #include <cfloat>
+#include <cstddef>
+#include <unordered_map>
 #include <vector>
 
 #define CUDA_CHECK(call)                                                       \
@@ -20,6 +22,57 @@
     } while (0)
 
 inline int cdiv(int a, int b) { return (a + b - 1) / b; }
+
+inline std::unordered_map<void*, size_t>& project_cuda_allocations() {
+    static std::unordered_map<void*, size_t> allocations;
+    return allocations;
+}
+
+inline size_t& project_cuda_current_bytes() {
+    static size_t current = 0;
+    return current;
+}
+
+inline size_t& project_cuda_peak_bytes() {
+    static size_t peak = 0;
+    return peak;
+}
+
+inline void project_cuda_memory_tracking_clear() {
+    project_cuda_allocations().clear();
+    project_cuda_current_bytes() = 0;
+    project_cuda_peak_bytes() = 0;
+}
+
+inline void project_cuda_memory_tracking_reset_peak() {
+    project_cuda_peak_bytes() = project_cuda_current_bytes();
+}
+
+inline size_t project_cuda_memory_tracking_peak_bytes() {
+    return project_cuda_peak_bytes();
+}
+
+inline cudaError_t tracked_cuda_malloc(void** ptr, size_t size) {
+    cudaError_t err = cudaMalloc(ptr, size);
+    if (err == cudaSuccess && ptr != nullptr && *ptr != nullptr) {
+        project_cuda_allocations()[*ptr] = size;
+        project_cuda_current_bytes() += size;
+        if (project_cuda_current_bytes() > project_cuda_peak_bytes()) {
+            project_cuda_peak_bytes() = project_cuda_current_bytes();
+        }
+    }
+    return err;
+}
+
+inline cudaError_t tracked_cuda_free(void* ptr) {
+    auto& allocations = project_cuda_allocations();
+    auto it = allocations.find(ptr);
+    if (it != allocations.end()) {
+        project_cuda_current_bytes() -= it->second;
+        allocations.erase(it);
+    }
+    return cudaFree(ptr);
+}
 
 using project_in_t = half;
 using project_out_t = float;

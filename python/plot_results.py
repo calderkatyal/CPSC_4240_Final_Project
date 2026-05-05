@@ -106,7 +106,7 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
             markersize=6,
         )
     ax.set_xlabel("Sequence Length (N)")
-    ax.set_ylabel("Approx. Memory (MB)")
+    ax.set_ylabel("Peak GPU Memory (MB)")
     ax.set_title(title)
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
@@ -208,7 +208,7 @@ def generate_from_csv(path: Path, label: str, prefix: str) -> None:
     rows = load_csv(path)
     groups = group_by_method(rows)
     plot_runtime_scaling(groups, f"Attention Runtime Scaling ({label})", RESULTS_DIR / f"{prefix}_runtime.pdf")
-    plot_memory_scaling(groups, f"Approximate Memory ({label})", RESULTS_DIR / f"{prefix}_memory.pdf")
+    plot_memory_scaling(groups, f"Peak GPU Memory ({label})", RESULTS_DIR / f"{prefix}_memory.pdf")
     plot_speedup_vs_naive(groups, f"Speedup vs Naive ({label})", RESULTS_DIR / f"{prefix}_speedup.pdf")
     plot_ablation_bars(groups, f"Ablation Comparison ({label})", RESULTS_DIR / f"{prefix}_ablation.pdf")
 

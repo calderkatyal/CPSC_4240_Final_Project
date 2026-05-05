@@ -226,9 +226,9 @@ inline void launch_flash_attention_splitkv(
     float* partial_m = nullptr;
     float* partial_l = nullptr;
     float* partial_o = nullptr;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&partial_m), (size_t)num_splits * BH * N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&partial_l), (size_t)num_splits * BH * N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&partial_o), (size_t)num_splits * BH * N * d * sizeof(float)));
+    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_m), (size_t)num_splits * BH * N * sizeof(float)));
+    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_l), (size_t)num_splits * BH * N * sizeof(float)));
+    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_o), (size_t)num_splits * BH * N * d * sizeof(float)));
 
     size_t partial_smem = (PROJECT_TILE * d) * sizeof(project_in_t);
     partial_smem += (PROJECT_TILE * d) * sizeof(project_in_t);
@@ -250,9 +250,9 @@ inline void launch_flash_attention_splitkv(
     );
     CUDA_CHECK(cudaGetLastError());
 
-    CUDA_CHECK(cudaFree(partial_m));
-    CUDA_CHECK(cudaFree(partial_l));
-    CUDA_CHECK(cudaFree(partial_o));
+    CUDA_CHECK(tracked_cuda_free(partial_m));
+    CUDA_CHECK(tracked_cuda_free(partial_l));
+    CUDA_CHECK(tracked_cuda_free(partial_o));
 }
 
 }  // namespace project_flash

@@ -112,7 +112,7 @@ void naive_attention(
 
     int BH = B * H;
     float* d_S = nullptr;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_S), (size_t)BH * N * N * sizeof(float)));
+    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&d_S), (size_t)BH * N * N * sizeof(float)));
 
     {
         dim3 block(16, 16);
@@ -132,6 +132,6 @@ void naive_attention(
         naive_pv_kernel<<<grid, block>>>(d_S, d_V, d_O, N, d);
     }
 
-    CUDA_CHECK(cudaFree(d_S));
+    CUDA_CHECK(tracked_cuda_free(d_S));
     CUDA_CHECK(cudaGetLastError());
 }
