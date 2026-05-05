@@ -5,8 +5,9 @@ This script runs the local CUDA benchmark binary and then merges any separately
 generated official FlashAttention CSVs into one comparison file.
 
 Official FlashAttention-1 and FlashAttention-2 should be benchmarked from
-separate Python environments via `python/benchmark_official_flash_attn.py`,
-since they share the same package name but are different installed versions.
+separate invocations of `python/benchmark_official_flash_attn.py`. In this
+project setup, FA1 is imported from a source tree via `--source-dir`, while
+FA2 is imported from the installed `flash_attn` wheel.
 """
 
 from __future__ import annotations

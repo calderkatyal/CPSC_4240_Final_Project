@@ -3,9 +3,8 @@
 # Recommended cluster stack for RTX 5000 Ada:
 #   module load CUDA/12.1.1
 #
-# We benchmark official FlashAttention-1 and FlashAttention-2 from separate
-# source trees inside one shared Python environment. CUDA 12.1.1 is the
-# cleanest common choice because:
+# We benchmark official FlashAttention-1 and FlashAttention-2 inside one shared
+# Python environment. CUDA 12.1.1 is the cleanest common choice because:
 #   - official FA1 requires CUDA 11.4+ and checks that nvcc matches PyTorch's CUDA
 #   - official FA2 requires CUDA 12.0+
 #   - cu121 PyTorch wheels match the CUDA/12.1.1 module well
@@ -17,22 +16,26 @@
 #   pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.2.2
 #   pip install -r requirements.txt
 #
-# Clone both official tagged source trees with submodules:
-#   python python/setup_official_flash_attn_sources.py
+# Clone the official FA1 source tree with submodules:
+#   mkdir -p external
+#   cd external
+#   git clone --branch v1.0.9 --depth 1 --recurse-submodules \
+#       https://github.com/Dao-AILab/flash-attention.git flash-attn-fa1
+#   cd ..
 #
-# Build the official CUDA extensions in place:
+# Install the official baselines:
 #   cd external/flash-attn-fa1 && python setup.py build_ext --inplace
-#   cd ../flash-attn-fa2 && MAX_JOBS=4 python setup.py build_ext --inplace
+#   pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.6/flash_attn-2.5.6+cu122torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 #
 # Benchmark them from the shared environment:
 #   cd /path/to/project
 #   python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
-#   python python/benchmark_official_flash_attn.py --version fa2 --source-dir external/flash-attn-fa2
+#   python python/benchmark_official_flash_attn.py --version fa2
 #
 # Note:
-#   Official FA1 and FA2 both use the top-level Python package name `flash_attn`,
-#   so importing them side by side works best by building them in different
-#   folders and selecting the desired source tree with `--source-dir`.
+#   Official FA1 and FA2 both use the top-level Python package name `flash_attn`.
+#   In this project, FA1 is imported from a checked-out source tree via
+#   `--source-dir`, while FA2 is imported from the installed wheel.
 
 numpy>=1.26,<2
 matplotlib>=3.8,<4

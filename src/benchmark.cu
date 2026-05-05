@@ -222,8 +222,8 @@ int main(int argc, char** argv) {
 
     fclose(csv);
     printf("Project kernel results written to results/benchmark_results.csv\n");
-    printf("Run python/benchmark_official_flash_attn.py in separate FA1 and FA2\n");
-    printf("environments, then run python/run_benchmarks.py to merge all results.\n");
+    printf("Run python/benchmark_official_flash_attn.py for FA1 and FA2,\n");
+    printf("then run python/run_benchmarks.py to merge all results.\n");
 
     return 0;
 }

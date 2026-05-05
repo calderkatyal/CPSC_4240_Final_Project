@@ -5,7 +5,6 @@ Examples:
   python python/benchmark_official_flash_attn.py --version fa1
   python python/benchmark_official_flash_attn.py --version fa2
   python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
-  python python/benchmark_official_flash_attn.py --version fa2 --source-dir external/flash-attn-fa2
 """
 
 from __future__ import annotations
@@ -161,7 +160,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", choices=["fa1", "fa2"], required=True)
     parser.add_argument(
         "--source-dir",
-        help="Optional extracted and built official flash-attn source tree to import from.",
+        help="Optional built official flash-attn source tree to import from, used for FA1.",
     )
     return parser.parse_args()
 

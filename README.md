@@ -61,16 +61,20 @@ pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.2.2
 pip install -r requirements.txt
 ```
 
-### 5. Clone the official FlashAttention source trees
+### 5. Clone the official FlashAttention-1 source tree
 
-The project benchmarks two official versions from the same upstream repository, checked out at different tags:
+The project benchmarks:
+
+- official FlashAttention-1 from a checked-out source tree
+- official FlashAttention-2 from a prebuilt wheel that matches the Yale Python 3.10 / PyTorch 2.2 / CUDA 12.x environment
+
+Clone the official FA1 source tree with submodules:
 
 ```bash
 mkdir -p external
 cd external
 
 git clone --branch v1.0.9 --depth 1 --recurse-submodules https://github.com/Dao-AILab/flash-attention.git flash-attn-fa1
-git clone --branch v2.8.3 --depth 1 --recurse-submodules https://github.com/Dao-AILab/flash-attention.git flash-attn-fa2
 
 cd ..
 ```
@@ -85,27 +89,29 @@ export CXX=$(which g++)
 export CUDAHOSTCXX=$(which g++)
 ```
 
-### 7. Build the official FlashAttention baselines
+### 7. Install the official FlashAttention baselines
 
-Build both official versions in place:
+Build the official FA1 extension in place:
 
 ```bash
 cd external/flash-attn-fa1
 python setup.py build_ext --inplace
-
-cd ../flash-attn-fa2
-MAX_JOBS=4 python setup.py build_ext --inplace
-
 cd ../..
+```
+
+Install the official FA2 wheel into the shared virtual environment:
+
+```bash
+pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.6/flash_attn-2.5.6+cu122torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 ```
 
 ### 8. Benchmark official FlashAttention-1 and FlashAttention-2
 
-Run the official baselines first:
+Run the official baselines first. FA1 is imported from its source tree, while FA2 is imported from the installed `flash_attn` package:
 
 ```bash
 python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
-python python/benchmark_official_flash_attn.py --version fa2 --source-dir external/flash-attn-fa2
+python python/benchmark_official_flash_attn.py --version fa2
 ```
 
 This writes:
