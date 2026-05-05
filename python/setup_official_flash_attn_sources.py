@@ -1,5 +1,5 @@
 """
-Download and extract official FlashAttention source distributions side by side.
+Download and extract official FlashAttention tagged source archives side by side.
 
 This script keeps FA1 and FA2 in separate folders so they can be built and
 benchmarked from a single Python environment by swapping `--source-dir`.
@@ -8,19 +8,20 @@ benchmarked from a single Python environment by swapping `--source-dir`.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.request
 from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DEST = ROOT_DIR / "external"
 SPECS = [
-    ("1.0.9", "flash-attn-fa1"),
-    ("2.8.3", "flash-attn-fa2"),
+    ("v1.0.9", "flash-attn-fa1"),
+    ("v2.8.3", "flash-attn-fa2"),
 ]
+ARCHIVE_URL = "https://github.com/Dao-AILab/flash-attention/archive/refs/tags/{tag}.tar.gz"
 
 
 def extract_tarball(tar_path: Path, target_dir: Path) -> None:
@@ -45,27 +46,12 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        for version, folder_name in SPECS:
-            print(f"Downloading flash-attn=={version} source distribution...")
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "download",
-                    "--no-binary",
-                    ":all:",
-                    "--no-deps",
-                    f"flash-attn=={version}",
-                    "-d",
-                    str(tmp_path),
-                ],
-                check=True,
-            )
-            tarballs = sorted(tmp_path.glob(f"flash_attn-{version}*.tar.gz"))
-            if not tarballs:
-                raise FileNotFoundError(f"Could not find downloaded tarball for flash-attn=={version}")
-            extract_tarball(tarballs[-1], dest / folder_name)
+        for tag, folder_name in SPECS:
+            tar_path = tmp_path / f"{folder_name}.tar.gz"
+            url = ARCHIVE_URL.format(tag=tag)
+            print(f"Downloading official flash-attention archive {tag}...")
+            urllib.request.urlretrieve(url, tar_path)
+            extract_tarball(tar_path, dest / folder_name)
             print(f"  Extracted to {dest / folder_name}")
 
     print("\nNext steps:")

@@ -17,7 +17,7 @@
 #   pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.2.2
 #   pip install -r requirements.txt
 #
-# Download and extract both official source trees:
+# Download and extract both official tagged source trees:
 #   python python/setup_official_flash_attn_sources.py
 #
 # Build the official CUDA extensions in place:
