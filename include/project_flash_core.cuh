@@ -81,7 +81,7 @@ __device__ inline void compute_score_tile_tensor_core(
     wmma::store_matrix_sync(s_scores, c_frag, PROJECT_TILE, wmma::mem_row_major);
 }
 
-__global__ void flash_attention_core_kernel(
+static __global__ void flash_attention_core_kernel(
     const project_in_t* __restrict__ Q,
     const project_in_t* __restrict__ K,
     const project_in_t* __restrict__ V,

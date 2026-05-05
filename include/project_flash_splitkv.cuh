@@ -4,7 +4,7 @@
 
 namespace project_flash {
 
-__global__ void flash_attention_splitkv_partial_kernel(
+static __global__ void flash_attention_splitkv_partial_kernel(
     const project_in_t* __restrict__ Q,
     const project_in_t* __restrict__ K,
     const project_in_t* __restrict__ V,
