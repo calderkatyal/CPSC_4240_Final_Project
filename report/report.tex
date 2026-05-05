@@ -48,7 +48,7 @@ CPSC 4240: Parallel Programming \\
 \maketitle
 
 \begin{abstract}
-FlashAttention is the standard exact attention kernel used in modern large language models because it substantially reduces high-bandwidth-memory traffic while preserving exact attention outputs. In this project, we implement a compact CUDA C++ attention benchmark suite centered on the most important broad ideas from FlashAttention-1: shared-memory tiling, online softmax, fused score/softmax/value computation, mixed precision, and tensor-core score tiles. We then add one carefully scoped extension motivated by later versions: a split-KV sequence-parallel path inspired by an important forward-only implementation idea in FlashAttention-2. Our goal is not to reproduce the full production codebase; rather, it is to evaluate how much of FlashAttention's forward-pass advantage can be captured by a compact kernel that preserves the main FA1 design choices, and then to measure how much additional benefit is provided by the FA2-style modification once that FA1 core is already in place. The resulting benchmark suite compares a naive mixed-precision baseline, a simplified FlashAttention-1 kernel, a FlashAttention-2-inspired forward extension, ablations of the most important FA1 design decisions, and two official baselines: FlashAttention-1 and FlashAttention-2.
+FlashAttention is the standard exact attention kernel used in modern large language models because it substantially reduces high-bandwidth-memory traffic while preserving exact attention outputs. In this project, we implement a compact CUDA C++ attention benchmark suite centered on the most important broad ideas from FlashAttention-1: shared-memory tiling, online softmax, fused score/softmax/value computation, mixed precision, and tensor-core score tiles. We then add one carefully scoped extension motivated by later versions: a split-KV sequence-parallel path inspired by an important forward-only implementation idea in FlashAttention-2. Our goal is not to reproduce the full production codebase; rather, it is to evaluate how much of FlashAttention's forward-pass advantage can be captured by a compact kernel that preserves the main FA1 design choices, and then to measure how much additional benefit is provided by the FA2-style modification once that FA1 core is already in place. The resulting benchmark suite compares a shared PyTorch eager-attention baseline, a simplified FlashAttention-1 kernel, a FlashAttention-2-inspired forward extension, ablations of the most important FA1 design decisions, and two official baselines: FlashAttention-1 and FlashAttention-2.
 \end{abstract}
 
 \section{Introduction and Motivation}
@@ -64,7 +64,7 @@ Our project goal is narrower than reimplementing the entire official repository.
     \item Once a simplified FlashAttention-1 kernel is implemented, does a key forward-only idea from FlashAttention-2 still help?
     \item How large is the gap between a compact educational CUDA implementation and the production \texttt{flash\_attn} module?
 \end{enumerate}
-To answer these questions, we implement a GPU-only benchmark suite with a naive mixed-precision baseline, a simplified FlashAttention-1 core, one later-version-inspired extension, and two ablations that remove key FA1 ingredients. The benchmark suite is designed to compare these project kernels against both official FlashAttention-1 and official FlashAttention-2 on the same CUDA machine.
+To answer these questions, we implement a GPU-only benchmark suite with a shared PyTorch eager-attention baseline, a simplified FlashAttention-1 core, one later-version-inspired extension, and two ablations that remove key FA1 ingredients. The benchmark suite is designed to compare these project kernels against both official FlashAttention-1 and official FlashAttention-2 on the same CUDA machine.
 
 \section{Background}
 \subsection{Attention and the memory bottleneck}
@@ -103,10 +103,10 @@ These are the parts of FlashAttention that are both conceptually central and bro
         \parbox{0.94\linewidth}{
             \centering
             \small
-            \textbf{Memory-Traffic View of Naive Attention vs.\ FlashAttention}\\[5pt]
+            \textbf{Memory-Traffic View of Eager Attention vs.\ FlashAttention}\\[5pt]
             \begin{minipage}[t]{0.46\linewidth}
                 \centering
-                \textbf{Naive attention}\\[3pt]
+                \textbf{Eager attention}\\[3pt]
                 \fbox{\parbox{0.8\linewidth}{\centering Read $Q,K$}}\\[3pt]
                 $\Downarrow$\\[3pt]
                 \fbox{\parbox{0.8\linewidth}{\centering Form full $N \times N$ score matrix $S$}}\\[3pt]
@@ -137,8 +137,8 @@ These are the parts of FlashAttention that are both conceptually central and bro
 \end{figure}
 
 \section{Methods}
-\subsection{Naive mixed-precision baseline}
-Our baseline uses the usual three-stage attention decomposition: compute $QK^\top$, apply row-wise softmax, and finally multiply by $V$. The implementation uses FP16 inputs so that it is compared against the project kernels under similar data-type assumptions, but it still materializes the full score matrix in FP32. This baseline therefore preserves exact attention math while exposing the major memory-system weakness that FlashAttention is designed to remove.
+\subsection{PyTorch eager-attention baseline}
+Our shared baseline matches the eager PyTorch attention path used in the official FlashAttention benchmark script. It stacks $Q,K,V$ into a packed tensor, forms the full score matrix with a batched matrix multiply, applies the causal mask and row-wise softmax, and then multiplies the resulting attention probabilities by $V$. The implementation uses FP16 inputs so that it is compared against the project kernels under similar data-type assumptions, but it still materializes the full score matrix. This baseline therefore preserves exact attention math while exposing the major memory-system weakness that FlashAttention is designed to remove, and it provides one common denominator for both the project kernels and the official FlashAttention kernels.
 
 \subsection{Simplified FlashAttention-1 kernel}
 The main project kernel is our simplified FlashAttention-1 implementation. Each thread block owns a $64$-row query block composed of four warp-local $16$-row query tiles. For each outer iteration, the kernel stages the current query block together with a $64$-key / $64$-value block in shared memory, computes the score subtiles with WMMA tensor-core fragments, and maintains per-row running softmax statistics across KV blocks. Let $m_i$ and $\ell_i$ denote the running row maximum and running normalization term for query row $i$. For a new KV block producing scores $s_{ij}$, the online recurrence is
@@ -183,14 +183,14 @@ Our kernel is intentionally smaller than the official implementation, but it pre
             \centering
             \small
             \textbf{Kernel Flow Used in This Project}\\[4pt]
-            \fbox{\parbox{0.19\linewidth}{\centering Naive\\Materialize $QK^\top$}} \hfill
+            \fbox{\parbox{0.19\linewidth}{\centering PyTorch baseline\\Materialize $QK^\top$}} \hfill
             $\Longrightarrow$ \hfill
             \fbox{\parbox{0.19\linewidth}{\centering Simplified FA1\\Block + online softmax}} \hfill
             $\Longrightarrow$ \hfill
             \fbox{\parbox{0.24\linewidth}{\centering FA2-inspired\\Split-KV combine}}
         }
     }
-    \caption{Conceptual progression of the benchmarked methods. The naive baseline and the two project kernels all compute exact causal attention, but they differ in how work and memory movement are organized.}
+    \caption{Conceptual progression of the benchmarked methods. The shared PyTorch baseline and the two project kernels all compute exact causal attention, but they differ in how work and memory movement are organized.}
     \label{fig:method_progression}
 \end{figure}
 
@@ -220,7 +220,7 @@ The ablations are important because they let us isolate whether the main gain co
         \toprule
         Method & Upstream concept tested & Exact? & Primary question answered \\
         \midrule
-        Naive & Standard attention decomposition & yes & What is the baseline cost when the score matrix is fully materialized? \\
+        PyTorch baseline & Standard eager attention decomposition & yes & What is the baseline cost when the score matrix is fully materialized? \\
         Simplified FA1 & Tiling + online softmax + fusion & yes & How much of the main FlashAttention behavior appears once the core FA1 ideas are implemented? \\
         FA2-inspired & Split-KV sequence parallelism & yes & Does KV-range partitioning help after the FA1 core is already in place? \\
         Ablations & Removal of one FA1 ingredient at a time & yes & Which FA1 ingredients are actually carrying the performance gain? \\
@@ -268,7 +268,7 @@ The FA2-inspired kernel keeps the same intra-block computation but changes how t
         \toprule
         Method & Exact & Causal & FP16 in & FP32 accum & Tensor cores & Split-KV \\
         \midrule
-        Naive & yes & yes & yes & yes & no & no \\
+        PyTorch baseline & yes & yes & yes & yes & no & no \\
         Simplified FA1 & yes & yes & yes & yes & yes & no \\
         FA2-inspired & yes & yes & yes & yes & yes & yes \\
         No online softmax & yes & yes & yes & yes & yes & no \\
@@ -299,11 +299,11 @@ We study dense causal self-attention in a controlled forward-only setting. All m
     \end{tabular}
 \end{table}
 
-The benchmark uses one fixed batch/head configuration and varies only sequence length. This makes the role of memory traffic particularly visible, since increasing $N$ enlarges the naive score matrix quadratically while leaving the head dimension fixed. We report runtime, peak GPU memory, and maximum absolute error relative to an FP32 reference.
+The benchmark uses one fixed batch/head configuration and varies only sequence length. This makes the role of memory traffic particularly visible, since increasing $N$ enlarges the fully materialized score matrix quadratically while leaving the head dimension fixed. We report runtime, peak GPU memory, and maximum absolute error relative to an FP32 reference.
 
 The evaluation reports four classes of comparisons.
 \begin{enumerate}
-    \item \textbf{Naive vs.\ simplified FA1.} This isolates the main FlashAttention-1 design choices.
+    \item \textbf{PyTorch baseline vs.\ simplified FA1.} This isolates the main FlashAttention-1 design choices inside the project CUDA kernels.
     \item \textbf{Simplified FA1 vs.\ FA2-inspired.} This isolates split-KV sequence parallelism.
     \item \textbf{Project kernels vs.\ official FlashAttention-1 and FlashAttention-2.} This measures the gap between the educational implementation and the production kernels from both generations.
     \item \textbf{FA1 ablations.} These isolate which of the core FA1 ingredients are most important in practice.
@@ -355,7 +355,7 @@ The official baselines serve two distinct roles in this study. Official FlashAtt
 \begin{table}[H]
     \centering
     \small
-    \caption{Speedup relative to the naive baseline. This table directly quantifies the effect of the FlashAttention-1 core and the FA2-inspired addition.}
+    \caption{Speedup relative to the shared PyTorch attention baseline. This table directly quantifies the effect of the FlashAttention-1 core and the FA2-inspired addition under one common denominator for all methods.}
     \label{tab:speedups}
     \begin{tabular}{lcccc}
         \toprule
@@ -369,21 +369,21 @@ The official baselines serve two distinct roles in this study. Official FlashAtt
 \begin{table}[H]
     \centering
     \small
-    \caption{Ablation table for the FlashAttention-1 core at $N=2048$. The speedup column is relative to the naive baseline at the same sequence length.}
+    \caption{Ablation table for the FlashAttention-1 core at $N=2048$. The speedup column is relative to the shared PyTorch attention baseline at the same sequence length.}
     \label{tab:ablation}
     \begin{tabular}{lccc}
         \toprule
-        Method & Runtime at $N=2048$ (ms) & Speedup vs.\ naive & Max abs.\ error \\
+        Method & Runtime at $N=2048$ (ms) & Speedup vs.\ PyTorch & Max abs.\ error \\
         \midrule
         \ablationTableRows
         \bottomrule
     \end{tabular}
 \end{table}
 
-Taken together, Figure~\ref{fig:gpuplots} and Tables~\ref{tab:runtime}--\ref{tab:ablation} answer complementary questions. The runtime table gives the most direct method-to-method comparison at representative sequence lengths, the speedup table makes the effect of the FA1 core and the FA2-inspired extension easier to read relative to the naive baseline, and the ablation table identifies which FA1 ingredients matter most once the benchmark moves into the long-sequence regime.
+Taken together, Figure~\ref{fig:gpuplots} and Tables~\ref{tab:runtime}--\ref{tab:ablation} answer complementary questions. The runtime table gives the most direct method-to-method comparison at representative sequence lengths, the speedup table makes the effect of the FA1 core and the FA2-inspired extension easier to read relative to a shared PyTorch attention baseline, and the ablation table identifies which FA1 ingredients matter most once the benchmark moves into the long-sequence regime.
 
 \section{Discussion}
-The evaluation is organized so that each comparison answers a specific systems question. The most important comparison is naive attention versus simplified FA1, since that isolates the practical effect of IO-aware tiling, online softmax, and score-matrix elimination in our compact kernel. The FA1-versus-FA2 comparison is intentionally narrower: it asks whether one specific forward-only idea from FA2---split-KV sequence parallelism with an exact combine step---contributes additional benefit once the FA1 core is already in place. Comparing against official FlashAttention-1 and FlashAttention-2 then provides an external reference frame for how far a compact implementation can approach the production kernels from those two generations.
+The evaluation is organized so that each comparison answers a specific systems question. The most important project-side comparison is the shared PyTorch baseline versus simplified FA1, since that isolates the practical effect of IO-aware tiling, online softmax, and score-matrix elimination in our compact kernel. The FA1-versus-FA2 comparison is intentionally narrower: it asks whether one specific forward-only idea from FA2---split-KV sequence parallelism with an exact combine step---contributes additional benefit once the FA1 core is already in place. For the merged speedup summaries, all methods are normalized against the same PyTorch attention baseline so that the official kernels and the project kernels share one common reference point.
 
 \section{Limitations}
 This project still has several deliberate limitations, all of which should be acknowledged in the final presentation of results.

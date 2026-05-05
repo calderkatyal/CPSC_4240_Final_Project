@@ -19,9 +19,10 @@ import matplotlib.pyplot as plt
 
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
+SPEEDUP_BASELINE = "PyTorch attention baseline (fp16)"
 
 COLORS = {
-    "Naive": "#d62728",
+    SPEEDUP_BASELINE: "#ff7f0e",
     "Simplified FA1": "#1f77b4",
     "FA2-inspired extension": "#2ca02c",
     "Official FlashAttention-1 (fp16)": "#9467bd",
@@ -31,7 +32,7 @@ COLORS = {
 }
 
 MARKERS = {
-    "Naive": "s",
+    SPEEDUP_BASELINE: "D",
     "Simplified FA1": "o",
     "FA2-inspired extension": "^",
     "Official FlashAttention-1 (fp16)": "P",
@@ -85,7 +86,7 @@ def plot_runtime_scaling(groups, title: str, output_path: Path) -> None:
 def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     priority = [
-        "Naive",
+        SPEEDUP_BASELINE,
         "Simplified FA1",
         "FA2-inspired extension",
         "Official FlashAttention-1 (fp16)",
@@ -118,22 +119,22 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
     print(f"  Saved {output_path}")
 
 
-def plot_speedup_vs_naive(groups, title: str, output_path: Path) -> None:
-    if "Naive" not in groups:
+def plot_speedup_vs_baseline(groups, title: str, output_path: Path) -> None:
+    if SPEEDUP_BASELINE not in groups:
         return
 
-    naive_map = dict(zip(groups["Naive"]["seq_lens"], groups["Naive"]["times"]))
+    baseline_map = dict(zip(groups[SPEEDUP_BASELINE]["seq_lens"], groups[SPEEDUP_BASELINE]["times"]))
     fig, ax = plt.subplots(figsize=(8, 5))
 
     for method, data in sorted(groups.items()):
-        if method == "Naive":
+        if method == SPEEDUP_BASELINE:
             continue
         seq_lens = []
         speedups = []
         for seq_len, time_ms in zip(data["seq_lens"], data["times"]):
-            if seq_len in naive_map and time_ms > 0:
+            if seq_len in baseline_map and time_ms > 0:
                 seq_lens.append(seq_len)
-                speedups.append(naive_map[seq_len] / time_ms)
+                speedups.append(baseline_map[seq_len] / time_ms)
         if seq_lens:
             ax.plot(
                 seq_lens,
@@ -145,9 +146,9 @@ def plot_speedup_vs_naive(groups, title: str, output_path: Path) -> None:
                 markersize=6,
             )
 
-    ax.axhline(1.0, color="gray", linestyle="--", alpha=0.6, label="Naive baseline")
+    ax.axhline(1.0, color="gray", linestyle="--", alpha=0.6, label="PyTorch baseline")
     ax.set_xlabel("Sequence Length (N)")
-    ax.set_ylabel("Speedup vs Naive")
+    ax.set_ylabel("Speedup vs PyTorch baseline")
     ax.set_title(title)
     ax.set_xscale("log", base=2)
     ax.grid(True, alpha=0.3)
@@ -209,7 +210,7 @@ def generate_from_csv(path: Path, label: str, prefix: str) -> None:
     groups = group_by_method(rows)
     plot_runtime_scaling(groups, f"Attention Runtime Scaling ({label})", RESULTS_DIR / f"{prefix}_runtime.pdf")
     plot_memory_scaling(groups, f"Peak GPU Memory ({label})", RESULTS_DIR / f"{prefix}_memory.pdf")
-    plot_speedup_vs_naive(groups, f"Speedup vs Naive ({label})", RESULTS_DIR / f"{prefix}_speedup.pdf")
+    plot_speedup_vs_baseline(groups, f"Speedup vs PyTorch baseline ({label})", RESULTS_DIR / f"{prefix}_speedup.pdf")
     plot_ablation_bars(groups, f"Ablation Comparison ({label})", RESULTS_DIR / f"{prefix}_ablation.pdf")
 
 

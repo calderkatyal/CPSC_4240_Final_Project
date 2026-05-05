@@ -8,9 +8,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "results"
+SPEEDUP_BASELINE = "PyTorch attention baseline (fp16)"
 
 RUNTIME_METHODS = [
-    ("Naive", "Naive"),
+    (SPEEDUP_BASELINE, "PyTorch baseline"),
     ("Simplified FA1", "Simplified FA1"),
     ("FA2-inspired extension", "FA2-inspired extension"),
     ("Official FlashAttention-1 (fp16)", "Official FlashAttention-1"),
@@ -85,6 +86,17 @@ def row_value(
     return row[field]
 
 
+def require_speedup_baseline(lookup: dict[tuple[str, int], dict[str, str]]) -> None:
+    required = sorted(set(TABLE_SEQS + [ABLATION_SEQ]))
+    missing = [seq for seq in required if (SPEEDUP_BASELINE, seq) not in lookup]
+    if missing:
+        raise ValueError(
+            "Missing shared PyTorch attention baseline rows for sequence lengths: "
+            + ", ".join(str(seq) for seq in missing)
+            + f". Expected method name: {SPEEDUP_BASELINE!r}."
+        )
+
+
 def make_runtime_rows(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
     lines = []
     for method_key, label in RUNTIME_METHODS:
@@ -96,11 +108,12 @@ def make_runtime_rows(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
 
 
 def make_speedup_rows(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
+    require_speedup_baseline(lookup)
     lines = []
     for method_key, label in SPEEDUP_METHODS:
         values = []
         for seq in TABLE_SEQS:
-            naive = row_value(lookup, "Naive", seq, "time_ms")
+            naive = row_value(lookup, SPEEDUP_BASELINE, seq, "time_ms")
             method = row_value(lookup, method_key, seq, "time_ms")
             if naive is None or method is None:
                 values.append(r"\blankcell")
@@ -111,7 +124,8 @@ def make_speedup_rows(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
 
 
 def make_ablation_rows(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
-    naive = row_value(lookup, "Naive", ABLATION_SEQ, "time_ms")
+    require_speedup_baseline(lookup)
+    naive = row_value(lookup, SPEEDUP_BASELINE, ABLATION_SEQ, "time_ms")
     lines = []
     for method_key, label in ABLATION_METHODS:
         runtime = row_value(lookup, method_key, ABLATION_SEQ, "time_ms")

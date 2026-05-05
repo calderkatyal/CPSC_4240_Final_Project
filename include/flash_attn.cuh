@@ -12,15 +12,6 @@
 //   - no Hopper-specific TMA / warp-specialized / FP8 kernels
 
 // ============================================================================
-// Naive Attention: Materializes full N×N attention matrix
-// ============================================================================
-void naive_attention(
-    const project_in_t* d_Q, const project_in_t* d_K, const project_in_t* d_V,
-    project_out_t* d_O,
-    int B, int H, int N, int d, float scale, bool causal
-);
-
-// ============================================================================
 // Simplified FA1-style kernel:
 //   - shared-memory tiling for K/V (and Q staging)
 //   - online softmax

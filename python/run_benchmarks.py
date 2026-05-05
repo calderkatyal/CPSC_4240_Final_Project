@@ -54,6 +54,7 @@ def merge_results() -> list[dict]:
 
     merged = load_rows(project_path)
     optional_paths = [
+        RESULTS_DIR / "official_pytorch_baseline_results.csv",
         RESULTS_DIR / "official_flash_attn_v1_results.csv",
         RESULTS_DIR / "official_flash_attn_v2_results.csv",
     ]

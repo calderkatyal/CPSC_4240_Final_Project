@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import math
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 RESULTS_DIR = ROOT_DIR / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 CSV_FIELDS = ["method", "seq_len", "time_ms", "memory_bytes", "max_error", "causal"]
+PYTORCH_BASELINE_LABEL = "PyTorch attention baseline (fp16)"
 
 
 def maybe_prepend_source_dir(source_dir: str | None) -> None:
@@ -51,6 +53,30 @@ def torch_reference_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
         scores = scores.masked_fill(mask, float("-inf"))
     probs = torch.softmax(scores, dim=-1)
     return torch.matmul(probs, v.float())
+
+
+def attention_pytorch_qkvpacked(qkv: torch.Tensor, causal: bool) -> torch.Tensor:
+    """PyTorch eager attention baseline adapted from the official FA benchmark script."""
+    batch_size, seqlen, _, nheads, d = qkv.shape
+    q, k, v = qkv.unbind(dim=2)
+    q = q.permute(0, 2, 1, 3).reshape(batch_size * nheads, seqlen, d)
+    k = k.permute(0, 2, 3, 1).reshape(batch_size * nheads, d, seqlen)
+    softmax_scale = 1.0 / math.sqrt(d)
+    scores = torch.empty(
+        batch_size * nheads, seqlen, seqlen, dtype=qkv.dtype, device=qkv.device
+    )
+    scores = torch.baddbmm(scores, q, k, beta=0, alpha=softmax_scale).reshape(
+        batch_size, nheads, seqlen, seqlen
+    )
+    if causal:
+        causal_mask = torch.triu(
+            torch.full((seqlen, seqlen), -10000.0, device=scores.device),
+            diagonal=1,
+        )
+        scores = scores + causal_mask.to(dtype=scores.dtype)
+    attention = torch.softmax(scores, dim=-1)
+    output = torch.einsum("bhts,bshd->bthd", attention, v)
+    return output.to(dtype=qkv.dtype)
 
 
 def benchmark_torch_callable(fn, warmup: int = 10, bench_iters: int = 50) -> float:
@@ -84,16 +110,12 @@ def measure_peak_memory_bytes(fn, warmup: int = 10) -> int:
 def get_fa1_callable():
     from flash_attn.flash_attn_interface import flash_attn_unpadded_qkvpacked_func
 
-    def call(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool) -> torch.Tensor:
-        # q, k, v arrive as (B, N, H, D)
-        bsz, seqlen, nheads, d = q.shape
-        qkv = torch.stack([q, k, v], dim=2).reshape(bsz * seqlen, 3, nheads, d)
-        cu_seqlens = torch.arange(
-            0, (bsz + 1) * seqlen, step=seqlen, dtype=torch.int32, device=q.device
-        )
+    def call(qkv_unpadded: torch.Tensor, cu_seqlens: torch.Tensor, seqlen: int, causal: bool) -> torch.Tensor:
         out = flash_attn_unpadded_qkvpacked_func(
-            qkv, cu_seqlens, seqlen, 0.0, softmax_scale=None, causal=causal
+            qkv_unpadded, cu_seqlens, seqlen, 0.0, softmax_scale=None, causal=causal
         )
+        bsz = cu_seqlens.numel() - 1
+        _, _, nheads, d = qkv_unpadded.shape
         return out.reshape(bsz, seqlen, nheads, d)
 
     return call
@@ -102,8 +124,7 @@ def get_fa1_callable():
 def get_fa2_callable():
     from flash_attn import flash_attn_qkvpacked_func
 
-    def call(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool) -> torch.Tensor:
-        qkv = torch.stack([q, k, v], dim=2)
+    def call(qkv: torch.Tensor, causal: bool) -> torch.Tensor:
         return flash_attn_qkvpacked_func(qkv, dropout_p=0.0, softmax_scale=None, causal=causal)
 
     return call
@@ -133,15 +154,24 @@ def run_benchmarks(version: str, source_dir: str | None) -> list[dict]:
         raise ValueError(f"Unsupported version: {version}")
 
     rows = []
+    baseline_rows = []
     print(f"Running {label} benchmarks...")
     for N in seq_lens:
         torch.manual_seed(42)
         q = torch.randn((B, N, H, d), device=device, dtype=dtype)
         k = torch.randn((B, N, H, d), device=device, dtype=dtype)
         v = torch.randn((B, N, H, d), device=device, dtype=dtype)
+        qkv = torch.stack([q, k, v], dim=2)
+        qkv_unpadded = qkv.reshape(B * N, 3, H, d)
+        cu_seqlens = torch.arange(0, (B + 1) * N, step=N, dtype=torch.int32, device=device)
 
         with torch.no_grad():
-            out = flash_fn(q, k, v, causal=causal)
+            if version == "fa1":
+                out = flash_fn(qkv_unpadded, cu_seqlens, N, causal=causal)
+                timed_flash = lambda: flash_fn(qkv_unpadded, cu_seqlens, N, causal=causal)
+            else:
+                out = flash_fn(qkv, causal=causal)
+                timed_flash = lambda: flash_fn(qkv, causal=causal)
             ref = torch_reference_attention(
                 q.permute(0, 2, 1, 3),
                 k.permute(0, 2, 1, 3),
@@ -149,8 +179,12 @@ def run_benchmarks(version: str, source_dir: str | None) -> list[dict]:
                 causal=causal,
             ).permute(0, 2, 1, 3)
             err = (out.float() - ref).abs().max().item()
-            t_ms = benchmark_torch_callable(lambda: flash_fn(q, k, v, causal=causal))
-            mem_bytes = measure_peak_memory_bytes(lambda: flash_fn(q, k, v, causal=causal))
+            t_ms = benchmark_torch_callable(timed_flash)
+            mem_bytes = measure_peak_memory_bytes(timed_flash)
+            baseline_out = attention_pytorch_qkvpacked(qkv, causal=causal)
+            baseline_err = (baseline_out.float() - ref).abs().max().item()
+            baseline_t_ms = benchmark_torch_callable(lambda: attention_pytorch_qkvpacked(qkv, causal=causal))
+            baseline_mem_bytes = measure_peak_memory_bytes(lambda: attention_pytorch_qkvpacked(qkv, causal=causal))
 
         rows.append(
             {
@@ -162,9 +196,20 @@ def run_benchmarks(version: str, source_dir: str | None) -> list[dict]:
                 "causal": 1,
             }
         )
+        baseline_rows.append(
+            {
+                "method": PYTORCH_BASELINE_LABEL,
+                "seq_len": N,
+                "time_ms": f"{baseline_t_ms:.4f}",
+                "memory_bytes": baseline_mem_bytes,
+                "max_error": f"{baseline_err:.6e}",
+                "causal": 1,
+            }
+        )
         print(f"  N={N}: {t_ms:.4f} ms, peak memory={mem_bytes} bytes, max error={err:.3e}")
 
     write_rows(out_path, rows)
+    write_rows(RESULTS_DIR / "official_pytorch_baseline_results.csv", baseline_rows)
     print(f"Wrote {out_path}")
     return rows
 

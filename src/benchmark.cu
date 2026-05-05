@@ -1,12 +1,14 @@
 // Benchmark suite
 //
 // This benchmark exercises:
-//   - a naive mixed-precision baseline that materializes the full N x N score matrix
 //   - a simplified FA1-style kernel with tensor-core score tiles
 //   - FA2-style split-KV sequence parallelism
 //   - FA1 ablations for online softmax and SRAM tiling
 //
-// Correctness is checked against a host-side float32 reference.
+// Correctness is checked against a host-side float32 reference. The shared
+// PyTorch baseline and official FlashAttention baselines are benchmarked from
+// the Python harness so that the same eager-attention reference can be used
+// across all merged comparisons.
 
 #include "flash_attn.cuh"
 #include "project_flash_splitkv.cuh"
@@ -150,7 +152,6 @@ int main(int argc, char** argv) {
     };
 
     MethodEntry methods[] = {
-        {"Naive", naive_attention},
         {"Simplified FA1", flash_attention_v1},
         {"FA2-inspired extension", flash_attention_v2},
         {"Ablation: no online softmax", flash_attention_v1_no_online_softmax},
@@ -237,7 +238,7 @@ int main(int argc, char** argv) {
 
     fclose(csv);
     printf("Project kernel results written to results/benchmark_results.csv\n");
-    printf("Run python/benchmark_official_flash_attn.py for FA1 and FA2,\n");
+    printf("Run python/benchmark_official_flash_attn.py for the shared PyTorch baseline, FA1, and FA2,\n");
     printf("then run python/run_benchmarks.py to merge all results.\n");
 
     return 0;

@@ -2,7 +2,7 @@
 
 This repository contains a CUDA C++ implementation of a simplified FlashAttention benchmark suite, together with plotting scripts and a NeurIPS-style report. The project compares:
 
-- a naive exact attention baseline
+- a shared PyTorch eager-attention baseline that matches the official FlashAttention benchmark style
 - a simplified FlashAttention-1-style kernel
 - an FA2-inspired split-KV extension
 - ablations of key FlashAttention-1 ideas
@@ -116,8 +116,16 @@ python python/benchmark_official_flash_attn.py --version fa2
 
 This writes:
 
+- `results/official_pytorch_baseline_results.csv`
 - `results/official_flash_attn_v1_results.csv`
 - `results/official_flash_attn_v2_results.csv`
+
+The shared PyTorch attention baseline is adapted directly from the official
+`benchmarks/benchmark_flash_attention.py` comparison in the FlashAttention
+repository. It materializes the full score matrix with PyTorch eager ops
+(`baddbmm`, softmax, and value contraction), so the merged speedup tables and
+figures use one common baseline for the project kernels and the official
+kernels.
 
 ### 9. Build and run the project benchmark
 
