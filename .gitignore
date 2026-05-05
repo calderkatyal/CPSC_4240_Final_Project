@@ -1,7 +1,9 @@
 CPSC4240FinalProjVenv/
 benchmark
 results/
-report/
+report/report.aux
+report/report.log
+report/report.out
 python/__pycache__/
 *.pyc
 .DS_Store
