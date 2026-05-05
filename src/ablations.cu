@@ -36,7 +36,7 @@ __global__ void two_pass_find_max_kernel(
     extern __shared__ unsigned char smem_raw[];
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d;
-    float* s_scores = reinterpret_cast<float*>(s_kt + PROJECT_TILE * d);
+    float* s_scores = reinterpret_cast<float*>(s_kt + PROJECT_BLOCK_N * d);
 
     const project_in_t zero = __float2half(0.0f);
     for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
@@ -48,7 +48,7 @@ __global__ void two_pass_find_max_kernel(
     __syncthreads();
 
     project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d;
-    float* s_scores_warp = s_scores + warp_id * PROJECT_TILE * PROJECT_TILE;
+    float* s_scores_warp = s_scores + warp_id * PROJECT_TILE * PROJECT_BLOCK_N;
 
     float local_max = -FLT_MAX;
     if (lane < PROJECT_TILE) {
@@ -58,23 +58,23 @@ __global__ void two_pass_find_max_kernel(
         }
     }
 
-    int num_kv_tiles = cdiv(N, PROJECT_TILE);
+    int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
     for (int kv_tile = 0; kv_tile < num_kv_tiles; kv_tile++) {
-        int kv_start = kv_tile * PROJECT_TILE;
-        load_kv_tile(s_kt, nullptr, k_base, nullptr, kv_start, N, d);
+        int kv_start = kv_tile * PROJECT_BLOCK_N;
+        load_kv_block(s_kt, nullptr, k_base, nullptr, kv_start, N, d);
         __syncthreads();
-        compute_score_tile_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale);
+        compute_score_block_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale);
         __syncwarp();
 
         if (lane < PROJECT_TILE) {
             int row = q_start + lane;
             if (row < N) {
-                for (int j = 0; j < PROJECT_TILE; j++) {
+                for (int j = 0; j < PROJECT_BLOCK_N; j++) {
                     int kv_idx = kv_start + j;
                     if (kv_idx >= N || (causal && kv_idx > row)) {
                         continue;
                     }
-                    local_max = fmaxf(local_max, s_scores_warp[lane * PROJECT_TILE + j]);
+                    local_max = fmaxf(local_max, s_scores_warp[lane * PROJECT_BLOCK_N + j]);
                 }
             }
         }
@@ -115,10 +115,8 @@ __global__ void two_pass_attn_kernel(
     extern __shared__ unsigned char smem_raw[];
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d;
-    project_in_t* s_v = s_kt + PROJECT_TILE * d;
-    float* s_scores = reinterpret_cast<float*>(s_v + PROJECT_TILE * d);
-    float* s_o = s_scores + PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_TILE;
-    float* s_l = s_o + PROJECT_BLOCK_M * d;
+    project_in_t* s_v = s_kt + PROJECT_BLOCK_N * d;
+    float* s_scores = reinterpret_cast<float*>(s_v + PROJECT_BLOCK_N * d);
 
     const project_in_t zero = __float2half(0.0f);
     for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
@@ -127,41 +125,40 @@ __global__ void two_pass_attn_kernel(
         int global_row = q_block_start + row;
         s_q[idx] = (global_row < N) ? q_base[global_row * d + col] : zero;
     }
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
-        s_o[idx] = 0.0f;
-    }
-    if (threadIdx.x < PROJECT_BLOCK_M) {
-        s_l[threadIdx.x] = 0.0f;
-    }
     __syncthreads();
 
     project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d;
-    float* s_scores_warp = s_scores + warp_id * PROJECT_TILE * PROJECT_TILE;
-    float* s_o_warp = s_o + warp_id * PROJECT_TILE * d;
-    float* s_l_warp = s_l + warp_id * PROJECT_TILE;
+    float* s_scores_warp = s_scores + warp_id * PROJECT_TILE * PROJECT_BLOCK_N;
 
-    int num_kv_tiles = cdiv(N, PROJECT_TILE);
+    float row_l = 0.0f;
+    float row_o[PROJECT_MAX_D];
+    #pragma unroll
+    for (int dd = 0; dd < PROJECT_MAX_D; dd++) {
+        row_o[dd] = 0.0f;
+    }
+
+    int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
     for (int kv_tile = 0; kv_tile < num_kv_tiles; kv_tile++) {
-        int kv_start = kv_tile * PROJECT_TILE;
-        load_kv_tile(s_kt, s_v, k_base, v_base, kv_start, N, d);
+        int kv_start = kv_tile * PROJECT_BLOCK_N;
+        load_kv_block(s_kt, s_v, k_base, v_base, kv_start, N, d);
         __syncthreads();
-        compute_score_tile_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale);
+        compute_score_block_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale);
         __syncwarp();
 
         if (lane < PROJECT_TILE) {
             int row = q_start + lane;
             if (row < N) {
                 float m = row_max[batch_head * N + row];
-                for (int j = 0; j < PROJECT_TILE; j++) {
+                for (int j = 0; j < PROJECT_BLOCK_N; j++) {
                     int kv_idx = kv_start + j;
                     if (kv_idx >= N || (causal && kv_idx > row)) {
                         continue;
                     }
 
-                    float p = expf(s_scores_warp[lane * PROJECT_TILE + j] - m);
-                    s_l_warp[lane] += p;
+                    float p = expf(s_scores_warp[lane * PROJECT_BLOCK_N + j] - m);
+                    row_l += p;
                     for (int dd = 0; dd < d; dd++) {
-                        s_o_warp[lane * d + dd] += p * __half2float(s_v[j * d + dd]);
+                        row_o[dd] += p * __half2float(s_v[j * d + dd]);
                     }
                 }
             }
@@ -173,9 +170,9 @@ __global__ void two_pass_attn_kernel(
     if (lane < PROJECT_TILE) {
         int row = q_start + lane;
         if (row < N) {
-            float inv_l = 1.0f / s_l_warp[lane];
+            float inv_l = 1.0f / row_l;
             for (int dd = 0; dd < d; dd++) {
-                o_base[row * d + dd] = s_o_warp[lane * d + dd] * inv_l;
+                o_base[row * d + dd] = row_o[dd] * inv_l;
             }
         }
     }
@@ -204,9 +201,6 @@ __global__ void flash_attn_no_tiling_kernel(
 
     extern __shared__ unsigned char smem_raw[];
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
-    float* s_o = reinterpret_cast<float*>(s_q + PROJECT_BLOCK_M * d);
-    float* s_m = s_o + PROJECT_BLOCK_M * d;
-    float* s_l = s_m + PROJECT_BLOCK_M;
 
     const project_in_t zero = __float2half(0.0f);
     for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
@@ -215,32 +209,29 @@ __global__ void flash_attn_no_tiling_kernel(
         int global_row = q_block_start + row;
         s_q[idx] = (global_row < N) ? q_base[global_row * d + col] : zero;
     }
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
-        s_o[idx] = 0.0f;
-    }
-    if (threadIdx.x < PROJECT_BLOCK_M) {
-        s_m[threadIdx.x] = -FLT_MAX;
-        s_l[threadIdx.x] = 0.0f;
-    }
     __syncthreads();
 
     project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d;
-    float* s_o_warp = s_o + warp_id * PROJECT_TILE * d;
-    float* s_m_warp = s_m + warp_id * PROJECT_TILE;
-    float* s_l_warp = s_l + warp_id * PROJECT_TILE;
+    float row_m = -FLT_MAX;
+    float row_l = 0.0f;
+    float row_o[PROJECT_MAX_D];
+    #pragma unroll
+    for (int dd = 0; dd < PROJECT_MAX_D; dd++) {
+        row_o[dd] = 0.0f;
+    }
 
     if (lane < PROJECT_TILE) {
         int row_in_tile = lane;
         int row = q_start + row_in_tile;
         if (row < N) {
             int max_j = causal ? (row + 1) : N;
-            int num_kv_tiles = cdiv(max_j, PROJECT_TILE);
+            int num_kv_tiles = cdiv(max_j, PROJECT_BLOCK_N);
 
             for (int kv_tile = 0; kv_tile < num_kv_tiles; kv_tile++) {
-                int kv_start = kv_tile * PROJECT_TILE;
+                int kv_start = kv_tile * PROJECT_BLOCK_N;
                 float row_max = -FLT_MAX;
 
-                for (int j = 0; j < PROJECT_TILE; j++) {
+                for (int j = 0; j < PROJECT_BLOCK_N; j++) {
                     int kv_idx = kv_start + j;
                     if (kv_idx >= max_j) {
                         continue;
@@ -254,16 +245,15 @@ __global__ void flash_attn_no_tiling_kernel(
                     row_max = fmaxf(row_max, dot * scale);
                 }
 
-                float m_old = s_m_warp[row_in_tile];
-                float m_new = fmaxf(m_old, row_max);
-                float alpha = expf(m_old - m_new);
+                float m_new = fmaxf(row_m, row_max);
+                float alpha = expf(row_m - m_new);
 
                 for (int dd = 0; dd < d; dd++) {
-                    s_o_warp[row_in_tile * d + dd] *= alpha;
+                    row_o[dd] *= alpha;
                 }
 
-                float l_new = s_l_warp[row_in_tile] * alpha;
-                for (int j = 0; j < PROJECT_TILE; j++) {
+                float l_new = row_l * alpha;
+                for (int j = 0; j < PROJECT_BLOCK_N; j++) {
                     int kv_idx = kv_start + j;
                     if (kv_idx >= max_j) {
                         continue;
@@ -278,18 +268,17 @@ __global__ void flash_attn_no_tiling_kernel(
                     float p = expf(dot * scale - m_new);
                     l_new += p;
                     for (int dd = 0; dd < d; dd++) {
-                        s_o_warp[row_in_tile * d + dd] +=
-                            p * __half2float(v_base[kv_idx * d + dd]);
+                        row_o[dd] += p * __half2float(v_base[kv_idx * d + dd]);
                     }
                 }
 
-                s_m_warp[row_in_tile] = m_new;
-                s_l_warp[row_in_tile] = l_new;
+                row_m = m_new;
+                row_l = l_new;
             }
 
-            float inv_l = 1.0f / s_l_warp[row_in_tile];
+            float inv_l = 1.0f / row_l;
             for (int dd = 0; dd < d; dd++) {
-                o_base[row * d + dd] = s_o_warp[row_in_tile * d + dd] * inv_l;
+                o_base[row * d + dd] = row_o[dd] * inv_l;
             }
         }
     }
@@ -317,14 +306,12 @@ void flash_attention_v1_no_online_softmax(
     CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&d_row_max), (size_t)BH * N * sizeof(float)));
 
     size_t pass1_smem = (PROJECT_BLOCK_M * d) * sizeof(project_in_t);
-    pass1_smem += (PROJECT_TILE * d) * sizeof(project_in_t);
-    pass1_smem += (PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_TILE) * sizeof(float);
+    pass1_smem += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
+    pass1_smem += (PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_BLOCK_N) * sizeof(float);
     size_t pass2_smem = (PROJECT_BLOCK_M * d) * sizeof(project_in_t);
-    pass2_smem += (PROJECT_TILE * d) * sizeof(project_in_t);
-    pass2_smem += (PROJECT_TILE * d) * sizeof(project_in_t);
-    pass2_smem += (PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_TILE) * sizeof(float);
-    pass2_smem += (PROJECT_BLOCK_M * d) * sizeof(float);
-    pass2_smem += PROJECT_BLOCK_M * sizeof(float);
+    pass2_smem += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
+    pass2_smem += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
+    pass2_smem += (PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_BLOCK_N) * sizeof(float);
 
     dim3 block(PROJECT_THREADS);
     dim3 grid(num_q_tiles, 1, BH);
@@ -374,8 +361,6 @@ void flash_attention_v1_no_tiling(
 
     int BH = B * H;
     size_t smem_bytes = (PROJECT_BLOCK_M * d) * sizeof(project_in_t);
-    smem_bytes += (PROJECT_BLOCK_M * d) * sizeof(float);
-    smem_bytes += 2 * PROJECT_BLOCK_M * sizeof(float);
     dim3 block(PROJECT_THREADS);
     dim3 grid(cdiv(N, PROJECT_BLOCK_M), 1, BH);
 

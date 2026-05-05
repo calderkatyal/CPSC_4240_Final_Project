@@ -33,11 +33,8 @@ static __global__ void flash_attention_splitkv_partial_kernel(
     extern __shared__ unsigned char smem_raw[];
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt0 = s_q + PROJECT_BLOCK_M * d;
-    project_in_t* s_v0 = s_kt0 + PROJECT_TILE * d;
-    float* s_scores = reinterpret_cast<float*>(s_v0 + PROJECT_TILE * d);
-    float* s_o = s_scores + PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_TILE;
-    float* s_m = s_o + PROJECT_BLOCK_M * d;
-    float* s_l = s_m + PROJECT_BLOCK_M;
+    project_in_t* s_v0 = s_kt0 + PROJECT_BLOCK_N * d;
+    float* s_scores = reinterpret_cast<float*>(s_v0 + PROJECT_BLOCK_N * d);
 
     const project_in_t zero = __float2half(0.0f);
     for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
@@ -46,22 +43,20 @@ static __global__ void flash_attention_splitkv_partial_kernel(
         int global_row = q_block_start + row;
         s_q[idx] = (global_row < N) ? q_base[global_row * d + col] : zero;
     }
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
-        s_o[idx] = 0.0f;
-    }
-    if (threadIdx.x < PROJECT_BLOCK_M) {
-        s_m[threadIdx.x] = -FLT_MAX;
-        s_l[threadIdx.x] = 0.0f;
-    }
     __syncthreads();
 
     project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d;
-    float* s_scores_warp = s_scores + warp_id * PROJECT_TILE * PROJECT_TILE;
-    float* s_o_warp = s_o + warp_id * PROJECT_TILE * d;
-    float* s_m_warp = s_m + warp_id * PROJECT_TILE;
-    float* s_l_warp = s_l + warp_id * PROJECT_TILE;
+    float* s_scores_warp = s_scores + warp_id * PROJECT_TILE * PROJECT_BLOCK_N;
 
-    int num_kv_tiles = cdiv(N, PROJECT_TILE);
+    float row_m = -FLT_MAX;
+    float row_l = 0.0f;
+    float row_o[PROJECT_MAX_D];
+    #pragma unroll
+    for (int dd = 0; dd < PROJECT_MAX_D; dd++) {
+        row_o[dd] = 0.0f;
+    }
+
+    int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
     int tiles_per_split = cdiv(num_kv_tiles, num_splits);
     int kv_tile_begin = split_idx * tiles_per_split;
     int kv_tile_end = (split_idx + 1) * tiles_per_split;
@@ -69,18 +64,18 @@ static __global__ void flash_attention_splitkv_partial_kernel(
         kv_tile_end = num_kv_tiles;
     }
     if (causal) {
-        int causal_limit = cdiv(q_end + 1, PROJECT_TILE);
+        int causal_limit = cdiv(q_end + 1, PROJECT_BLOCK_N);
         if (kv_tile_end > causal_limit) {
             kv_tile_end = causal_limit;
         }
     }
 
     for (int kv_tile = kv_tile_begin; kv_tile < kv_tile_end; kv_tile++) {
-        int kv_start = kv_tile * PROJECT_TILE;
-        load_kv_tile(s_kt0, s_v0, k_base, v_base, kv_start, N, d);
+        int kv_start = kv_tile * PROJECT_BLOCK_N;
+        load_kv_block(s_kt0, s_v0, k_base, v_base, kv_start, N, d);
 
         __syncthreads();
-        compute_score_tile_tensor_core(s_scores_warp, s_q_warp, s_kt0, d, scale);
+        compute_score_block_tensor_core(s_scores_warp, s_q_warp, s_kt0, d, scale);
         __syncwarp();
 
         if (lane < PROJECT_TILE) {
@@ -88,40 +83,38 @@ static __global__ void flash_attention_splitkv_partial_kernel(
             int row = q_start + row_in_tile;
             if (row < N) {
                 float row_max = -FLT_MAX;
-                for (int j = 0; j < PROJECT_TILE; j++) {
+                for (int j = 0; j < PROJECT_BLOCK_N; j++) {
                     int kv_idx = kv_start + j;
                     float score = -FLT_MAX;
                     if (kv_idx < N && (!causal || kv_idx <= row)) {
-                        score = s_scores_warp[row_in_tile * PROJECT_TILE + j];
+                        score = s_scores_warp[row_in_tile * PROJECT_BLOCK_N + j];
                     }
                     row_max = fmaxf(row_max, score);
                 }
 
                 if (row_max > -FLT_MAX) {
-                    float m_old = s_m_warp[row_in_tile];
-                    float m_new = fmaxf(m_old, row_max);
-                    float alpha = expf(m_old - m_new);
+                    float m_new = fmaxf(row_m, row_max);
+                    float alpha = expf(row_m - m_new);
 
                     for (int dd = 0; dd < d; dd++) {
-                        s_o_warp[row_in_tile * d + dd] *= alpha;
+                        row_o[dd] *= alpha;
                     }
 
-                    float l_new = s_l_warp[row_in_tile] * alpha;
-                    for (int j = 0; j < PROJECT_TILE; j++) {
+                    float l_new = row_l * alpha;
+                    for (int j = 0; j < PROJECT_BLOCK_N; j++) {
                         int kv_idx = kv_start + j;
                         if (kv_idx >= N || (causal && kv_idx > row)) {
                             continue;
                         }
-                        float p = expf(s_scores_warp[row_in_tile * PROJECT_TILE + j] - m_new);
+                        float p = expf(s_scores_warp[row_in_tile * PROJECT_BLOCK_N + j] - m_new);
                         l_new += p;
                         for (int dd = 0; dd < d; dd++) {
-                            s_o_warp[row_in_tile * d + dd] +=
-                                p * __half2float(s_v0[j * d + dd]);
+                            row_o[dd] += p * __half2float(s_v0[j * d + dd]);
                         }
                     }
 
-                    s_m_warp[row_in_tile] = m_new;
-                    s_l_warp[row_in_tile] = l_new;
+                    row_m = m_new;
+                    row_l = l_new;
                 }
             }
         }
@@ -133,11 +126,11 @@ static __global__ void flash_attention_splitkv_partial_kernel(
         int row = q_start + lane;
         if (row < N) {
             int split_row_idx = ((split_idx * gridDim.z + batch_head) * N) + row;
-            partial_m[split_row_idx] = s_m_warp[lane];
-            partial_l[split_row_idx] = s_l_warp[lane];
+            partial_m[split_row_idx] = row_m;
+            partial_l[split_row_idx] = row_l;
             int o_offset = split_row_idx * d;
             for (int dd = 0; dd < d; dd++) {
-                partial_o[o_offset + dd] = s_o_warp[lane * d + dd];
+                partial_o[o_offset + dd] = row_o[dd];
             }
         }
     }
@@ -199,7 +192,7 @@ inline int choose_splitkv_splits(int B, int H, int N) {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
-    int num_kv_tiles = cdiv(N, PROJECT_TILE);
+    int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
     int effective_sms = prop.multiProcessorCount * 2;
     return project_num_splits_heuristic(B * H * num_q_tiles, effective_sms, num_kv_tiles, 8);
 }
@@ -239,11 +232,9 @@ inline void launch_flash_attention_splitkv(
     CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_o), (size_t)num_splits * BH * N * d * sizeof(float)));
 
     size_t partial_smem = (PROJECT_BLOCK_M * d) * sizeof(project_in_t);
-    partial_smem += (PROJECT_TILE * d) * sizeof(project_in_t);
-    partial_smem += (PROJECT_TILE * d) * sizeof(project_in_t);
-    partial_smem += (PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_TILE) * sizeof(float);
-    partial_smem += (PROJECT_BLOCK_M * d) * sizeof(float);
-    partial_smem += 2 * PROJECT_BLOCK_M * sizeof(float);
+    partial_smem += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
+    partial_smem += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
+    partial_smem += (PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_BLOCK_N) * sizeof(float);
 
     dim3 block(PROJECT_THREADS);
     dim3 grid_partial(num_q_tiles, num_splits, BH);

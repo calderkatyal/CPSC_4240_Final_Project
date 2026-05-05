@@ -81,6 +81,8 @@ constexpr int PROJECT_TILE = 16;
 constexpr int PROJECT_WARP_SIZE = 32;
 constexpr int PROJECT_Q_WARPS = 4;
 constexpr int PROJECT_BLOCK_M = PROJECT_TILE * PROJECT_Q_WARPS;
+constexpr int PROJECT_BLOCK_N = 64;
+constexpr int PROJECT_K_TILES_PER_BLOCK = PROJECT_BLOCK_N / PROJECT_TILE;
 constexpr int PROJECT_THREADS = PROJECT_WARP_SIZE * PROJECT_Q_WARPS;
 constexpr int PROJECT_MAX_D = 128;
 

@@ -58,7 +58,7 @@ void flash_attention_v1_no_online_softmax(
     int B, int H, int N, int d, float scale, bool causal
 );
 
-// V1 with no tiling (single tile = entire sequence)
+// V1 with no shared-memory K/V tiling
 void flash_attention_v1_no_tiling(
     const project_in_t* d_Q, const project_in_t* d_K, const project_in_t* d_V,
     project_out_t* d_O,
