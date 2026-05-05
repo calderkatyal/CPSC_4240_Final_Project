@@ -8,6 +8,8 @@
 
 #include "project_flash_core.cuh"
 
+using namespace project_flash;
+
 namespace {
 
 __global__ void two_pass_find_max_kernel(
