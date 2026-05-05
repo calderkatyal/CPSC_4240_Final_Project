@@ -222,8 +222,8 @@ int main(int argc, char** argv) {
 
     fclose(csv);
     printf("Project kernel results written to results/benchmark_results.csv\n");
-    printf("Run python/run_benchmarks.py on a CUDA machine to add the optional\n");
-    printf("official flash_attn comparison and regenerate plots/report inputs.\n");
+    printf("Run python/benchmark_official_flash_attn.py in separate FA1 and FA2\n");
+    printf("environments, then run python/run_benchmarks.py to merge all results.\n");
 
     return 0;
 }

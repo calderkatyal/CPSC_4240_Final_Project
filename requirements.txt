@@ -1,24 +1,42 @@
 # Python dependencies for the simplified FlashAttention project.
 #
-# Important:
-#   Install PyTorch separately so it matches the CUDA toolkit you load on the
-#   cluster. For this project, CUDA 12.1.1 + cu121 PyTorch is the cleanest path.
-#   After PyTorch is installed, install the packages below and then optionally
-#   build flash-attn from source.
-#
-# Suggested cluster setup:
+# Recommended cluster stack for RTX 5000 Ada:
 #   module load CUDA/12.1.1
+#
+# We benchmark official FlashAttention-1 and FlashAttention-2 from separate
+# source trees inside one shared Python environment. CUDA 12.1.1 is the
+# cleanest common choice because:
+#   - official FA1 requires CUDA 11.4+ and checks that nvcc matches PyTorch's CUDA
+#   - official FA2 requires CUDA 12.0+
+#   - cu121 PyTorch wheels match the CUDA/12.1.1 module well
+#
+# Shared environment bootstrap:
 #   python -m venv venv
 #   source venv/bin/activate
 #   pip install --upgrade pip
-#   pip install --index-url https://download.pytorch.org/whl/cu121 torch
+#   pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.2.2
 #   pip install -r requirements.txt
-#   MAX_JOBS=4 pip install flash-attn --no-build-isolation
 #
-# `flash-attn` is intentionally not listed below because it is CUDA/PyTorch-build
-# dependent and is more reliable when installed explicitly after PyTorch.
+# Download and extract both official source trees:
+#   python python/setup_official_flash_attn_sources.py
+#
+# Build the official CUDA extensions in place:
+#   cd external/flash-attn-fa1 && python setup.py build_ext --inplace
+#   cd ../flash-attn-fa2 && MAX_JOBS=4 python setup.py build_ext --inplace
+#
+# Benchmark them from the shared environment:
+#   cd /path/to/project
+#   python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
+#   python python/benchmark_official_flash_attn.py --version fa2 --source-dir external/flash-attn-fa2
+#
+# Note:
+#   Official FA1 and FA2 both use the top-level Python package name `flash_attn`,
+#   so importing them side by side works best by building them in different
+#   folders and selecting the desired source tree with `--source-dir`.
 
 numpy>=1.26,<3
 matplotlib>=3.8,<4
 packaging>=24,<26
 ninja>=1.11,<2
+psutil>=5.9,<8
+einops>=0.7,<1

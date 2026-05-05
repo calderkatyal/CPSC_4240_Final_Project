@@ -24,7 +24,8 @@ COLORS = {
     "Naive": "#d62728",
     "Simplified FA1": "#1f77b4",
     "FA2-inspired extension": "#2ca02c",
-    "Official flash_attn (fp16)": "#9467bd",
+    "Official FlashAttention-1 (fp16)": "#9467bd",
+    "Official FlashAttention-2 (fp16)": "#8c564b",
     "Ablation: no online softmax": "#7f7f7f",
     "Ablation: no SRAM tiling": "#17becf",
 }
@@ -33,7 +34,8 @@ MARKERS = {
     "Naive": "s",
     "Simplified FA1": "o",
     "FA2-inspired extension": "^",
-    "Official flash_attn (fp16)": "P",
+    "Official FlashAttention-1 (fp16)": "P",
+    "Official FlashAttention-2 (fp16)": "X",
     "Ablation: no online softmax": "x",
     "Ablation: no SRAM tiling": "h",
 }
@@ -86,7 +88,8 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
         "Naive",
         "Simplified FA1",
         "FA2-inspired extension",
-        "Official flash_attn (fp16)",
+        "Official FlashAttention-1 (fp16)",
+        "Official FlashAttention-2 (fp16)",
     ]
     for method in priority:
         if method not in groups:
