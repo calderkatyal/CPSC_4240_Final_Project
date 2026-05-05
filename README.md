@@ -1,8 +1,6 @@
 # Simplified FlashAttention Project
 
-This repository contains a CUDA C++ implementation of a simplified FlashAttention benchmark suite, together with plotting scripts.
-
-The project compares:
+This repository contains a CUDA C++ implementation of a simplified FlashAttention benchmark suite, together with plotting scripts and a NeurIPS-style report. The project compares:
 
 - a naive exact attention baseline
 - a simplified FlashAttention-1-style kernel
