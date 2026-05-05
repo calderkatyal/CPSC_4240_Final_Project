@@ -170,6 +170,7 @@ module purge
 module load GCC/12.2.0
 module load CUDA/12.1.1
 module load Python/3.10.8-GCCcore-12.2.0
+module load texlive/20220321-GCC-12.2.0
 
 source venv/bin/activate
 
