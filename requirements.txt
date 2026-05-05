@@ -17,7 +17,7 @@
 #   pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.2.2
 #   pip install -r requirements.txt
 #
-# Download and extract both official tagged source trees:
+# Clone both official tagged source trees with submodules:
 #   python python/setup_official_flash_attn_sources.py
 #
 # Build the official CUDA extensions in place:
@@ -34,7 +34,7 @@
 #   so importing them side by side works best by building them in different
 #   folders and selecting the desired source tree with `--source-dir`.
 
-numpy>=1.26,<3
+numpy>=1.26,<2
 matplotlib>=3.8,<4
 packaging>=24,<26
 ninja>=1.11,<2
