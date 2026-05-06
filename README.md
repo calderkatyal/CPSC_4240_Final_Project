@@ -130,7 +130,7 @@ kernels.
 ### 9. Build and run the project benchmark
 
 ```bash
-make benchmark
+make clean benchmark
 python python/run_benchmarks.py
 ```
 
@@ -192,7 +192,7 @@ Then rerun the full benchmark/report pipeline:
 ```bash
 python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
 python python/benchmark_official_flash_attn.py --version fa2
-make benchmark
+make clean benchmark
 python python/run_benchmarks.py
 python python/plot_results.py
 python python/build_report.py
