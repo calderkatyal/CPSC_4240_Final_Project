@@ -578,42 +578,6 @@ inline void launch_flash_attention_core_impl(
     }
 }
 
-template<bool UseVecLoads>
-inline void launch_flash_attention_fa2_impl(
-    const project_in_t* d_Q,
-    const project_in_t* d_K,
-    const project_in_t* d_V,
-    project_out_t* d_O,
-    int B,
-    int H,
-    int N,
-    int d,
-    float scale,
-    bool causal
-) {
-    const float scale_l2 = scale * PROJECT_LOG2E;
-    switch (d) {
-        case 32:
-            dispatch_flash_attention_core_blockn<32, 8, UseVecLoads>(
-                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-            );
-            break;
-        case 64:
-            dispatch_flash_attention_core_blockn<64, 8, UseVecLoads>(
-                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-            );
-            break;
-        case 128:
-            dispatch_flash_attention_core_blockn<128, PROJECT_Q_WARPS, UseVecLoads>(
-                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-            );
-            break;
-        default:
-            fprintf(stderr, "Unsupported head dimension d=%d in FA2-inspired launcher.\n", d);
-            exit(EXIT_FAILURE);
-    }
-}
-
 inline void launch_flash_attention_core(
     const project_in_t* d_Q,
     const project_in_t* d_K,
@@ -646,24 +610,6 @@ inline void launch_flash_attention_core_no_vectorized_loads(
 ) {
     check_supported_head_dim(d);
     launch_flash_attention_core_impl<false>(
-        d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
-    );
-}
-
-inline void launch_flash_attention_fa2_extension(
-    const project_in_t* d_Q,
-    const project_in_t* d_K,
-    const project_in_t* d_V,
-    project_out_t* d_O,
-    int B,
-    int H,
-    int N,
-    int d,
-    float scale,
-    bool causal
-) {
-    check_supported_head_dim(d);
-    launch_flash_attention_fa2_impl<true>(
         d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
     );
 }

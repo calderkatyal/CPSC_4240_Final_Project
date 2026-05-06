@@ -354,6 +354,37 @@ struct SplitkvWorkspace {
     int capacity_d = 0;
 };
 
+inline int splitkv_device_sm_count() {
+    static const int sm_count = []() {
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+        return prop.multiProcessorCount;
+    }();
+    return sm_count;
+}
+
+template<int HEAD_DIM>
+inline int splitkv_cached_ctas_per_sm(size_t partial_smem) {
+    static const int ctas_per_sm = [partial_smem]() {
+        int cached_ctas = 1;
+        if (partial_smem >= 48 * 1024) {
+            CUDA_CHECK(cudaFuncSetAttribute(
+                flash_attention_splitkv_partial_kernel<HEAD_DIM>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                partial_smem
+            ));
+        }
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &cached_ctas,
+            flash_attention_splitkv_partial_kernel<HEAD_DIM>,
+            PROJECT_THREADS,
+            partial_smem
+        ));
+        return cached_ctas > 0 ? cached_ctas : 1;
+    }();
+    return ctas_per_sm;
+}
+
 inline SplitkvWorkspace& splitkv_workspace() {
     static SplitkvWorkspace workspace;
     return workspace;
@@ -412,34 +443,16 @@ inline void prepare_splitkv_workspace(int BH, int N, int d, int num_splits) {
 
 template<int HEAD_DIM>
 inline int choose_splitkv_splits(int B, int H, int N, size_t partial_smem) {
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
     int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
     int base_ctas = B * H * num_q_tiles;
-    if (num_kv_tiles <= 1 || base_ctas >= prop.multiProcessorCount) {
+    if (num_kv_tiles <= 1) {
         return 1;
     }
 
-    int ctas_per_sm = 1;
-    if (partial_smem >= 48 * 1024) {
-        CUDA_CHECK(cudaFuncSetAttribute(
-            flash_attention_splitkv_partial_kernel<HEAD_DIM>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            partial_smem
-        ));
-    }
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &ctas_per_sm,
-        flash_attention_splitkv_partial_kernel<HEAD_DIM>,
-        PROJECT_THREADS,
-        partial_smem
-    ));
-    if (ctas_per_sm < 1) {
-        ctas_per_sm = 1;
-    }
-
-    int active_cta_slots = prop.multiProcessorCount * ctas_per_sm;
+    const int ctas_per_sm = splitkv_cached_ctas_per_sm<HEAD_DIM>(partial_smem);
+    const int sm_count = splitkv_device_sm_count();
+    int active_cta_slots = sm_count * ctas_per_sm;
     if (base_ctas >= active_cta_slots) {
         return 1;
     }

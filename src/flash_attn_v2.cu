@@ -1,11 +1,12 @@
 // FA2-inspired forward extension.
 //
-// In this project, the later-version-inspired change is wider query ownership
-// per CTA. That keeps the compact WMMA kernel structure, but repartitions work
-// so each block amortizes K/V tile loads across more query rows, echoing
-// FlashAttention-2's broader emphasis on better work partitioning.
+// Official FlashAttention-2's forward path improves parallelism by splitting
+// work along the sequence / K-V dimension when a single attention head does not
+// expose enough CTAs to fill the GPU. The simplified project analogue here is a
+// split-KV path with a small combine kernel, while falling back to the FA1 core
+// when the baseline launch already provides enough parallel work.
 
-#include "project_flash_core.cuh"
+#include "project_flash_splitkv.cuh"
 
 void flash_attention_v2(
     const project_in_t* d_Q,
@@ -19,7 +20,7 @@ void flash_attention_v2(
     float scale,
     bool causal
 ) {
-    project_flash::launch_flash_attention_fa2_extension(
+    project_flash::launch_flash_attention_splitkv(
         d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
     );
 }

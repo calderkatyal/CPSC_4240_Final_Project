@@ -28,8 +28,8 @@ void flash_attention_v1(
 // FA2-inspired extension:
 //   - retains the simplified forward-only scope above
 //   - keeps the dense exact attention computation
-//   - repartitions each CTA to own a wider query block, reducing repeated K/V
-//     tile traffic and amortizing fixed softmax overhead across more rows
+//   - adds FA2-style sequence parallelism by optionally splitting the K/V
+//     dimension across multiple CTAs and combining the partial results
 //
 // Note: this is not a full implementation of official FlashAttention-2.
 // ============================================================================

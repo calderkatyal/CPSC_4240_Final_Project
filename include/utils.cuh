@@ -87,10 +87,6 @@ constexpr int PROJECT_THREADS = PROJECT_WARP_SIZE * PROJECT_Q_WARPS;
 constexpr int PROJECT_MAX_D = 128;
 constexpr float PROJECT_LOG2E = 1.4426950408889634f;
 
-inline int project_fa2_q_warps_for_head_dim(int d) {
-    return d <= 64 ? 8 : PROJECT_Q_WARPS;
-}
-
 inline bool project_is_supported_head_dim(int d) {
     return d == 32 || d == 64 || d == 128;
 }
@@ -129,8 +125,7 @@ inline void print_project_precision_summary(int d) {
     printf("Tensor-core score path: enabled for supported head dims {32, 64, 128}; current d=%d\n", d);
     printf("Simplified FA1 thread-block tiles: Q-block=%d rows, KV-block=%d rows\n",
            PROJECT_BLOCK_M, PROJECT_BLOCK_N);
-    printf("FA2-inspired extension: wider query ownership with %d-row Q blocks for d<=64\n",
-           PROJECT_TILE * project_fa2_q_warps_for_head_dim(d));
+    printf("FA2-inspired extension: split-KV sequence parallelism when FA1 launch parallelism is low\n");
 }
 
 inline void convert_project_output_to_float(
