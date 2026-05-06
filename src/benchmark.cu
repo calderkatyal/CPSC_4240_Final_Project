@@ -239,7 +239,7 @@ int main(int argc, char** argv) {
 
     fclose(csv);
     printf("Kernel results written to results/benchmark_results.csv\n");
-    printf("Run python/benchmark_official_flash_attn.py for the shared PyTorch baseline, FA1, and FA2,\n");
+    printf("Run python/benchmark_official_flash_attn.py for the shared PyTorch baseline and official FA1,\n");
     printf("then run python/run_benchmarks.py to merge all results.\n");
 
     return 0;

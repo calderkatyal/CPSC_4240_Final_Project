@@ -5,7 +5,7 @@ This repository contains a CUDA C++ implementation of a simplified FlashAttentio
 - a shared PyTorch eager-attention baseline that matches the official FlashAttention benchmark style
 - a simplified FlashAttention-1-style kernel
 - ablations of key FlashAttention-1 ideas
-- official FlashAttention-1 and FlashAttention-2 baselines
+- an official FlashAttention-1 baseline
 
 ## Yale Cluster Setup
 
@@ -62,11 +62,6 @@ pip install -r requirements.txt
 
 ### 5. Clone the official FlashAttention-1 source tree
 
-The project benchmarks:
-
-- official FlashAttention-1 from a checked-out source tree
-- official FlashAttention-2 from a prebuilt wheel that matches the Yale Python 3.10 / PyTorch 2.2 / CUDA 12.x environment
-
 Clone the official FA1 source tree with submodules:
 
 ```bash
@@ -88,7 +83,7 @@ export CXX=$(which g++)
 export CUDAHOSTCXX=$(which g++)
 ```
 
-### 7. Install the official FlashAttention baselines
+### 7. Build the official FlashAttention-1 extension
 
 Build the official FA1 extension in place:
 
@@ -98,33 +93,25 @@ python setup.py build_ext --inplace
 cd ../..
 ```
 
-Install the official FA2 wheel into the shared virtual environment:
+### 8. Benchmark official FlashAttention-1
+
+Run the official baseline first. FA1 is imported from its source tree:
 
 ```bash
-pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.6/flash_attn-2.5.6+cu122torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
-```
-
-### 8. Benchmark official FlashAttention-1 and FlashAttention-2
-
-Run the official baselines first. FA1 is imported from its source tree, while FA2 is imported from the installed `flash_attn` package:
-
-```bash
-python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
-python python/benchmark_official_flash_attn.py --version fa2
+python python/benchmark_official_flash_attn.py --source-dir external/flash-attn-fa1
 ```
 
 This writes:
 
 - `results/official_pytorch_baseline_results.csv`
 - `results/official_flash_attn_v1_results.csv`
-- `results/official_flash_attn_v2_results.csv`
 
 The shared PyTorch attention baseline is adapted directly from the official
 `benchmarks/benchmark_flash_attention.py` comparison in the FlashAttention
 repository. It materializes the full score matrix with PyTorch eager ops
 (`baddbmm`, softmax, and value contraction), so the merged speedup tables and
-figures use one common baseline for the project kernels and the official
-kernels.
+figures use one common baseline for the local kernel and the official
+FA1 kernel.
 
 ### 9. Build and run the project benchmark
 
@@ -159,14 +146,14 @@ The rebuilt PDF will be available at:
 
 This build expects the merged comparison outputs in `results/gpu_comparison_results.csv`
 plus `results/table_rows.tex` and `results/gpu_comparison_*.pdf`; it does not
-fall back to project-only report data. It reads those files but does not rewrite
+fall back to local-only report data. It reads those files but does not rewrite
 anything inside `results/`.
 
 ## Resume a Later Cluster Session
 
 If you already completed the one-time setup in an earlier session (packages
-installed, virtual environment created, official FA1 source cloned, and the FA2
-wheel installed), you do not need to repeat the install steps above.
+installed, virtual environment created, and official FA1 source cloned), you do
+not need to repeat the install steps above.
 
 From a fresh shell on the cluster, run:
 
@@ -189,8 +176,7 @@ export CUDAHOSTCXX=$(which g++)
 Then rerun the full benchmark/report pipeline:
 
 ```bash
-python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
-python python/benchmark_official_flash_attn.py --version fa2
+python python/benchmark_official_flash_attn.py --source-dir external/flash-attn-fa1
 make clean benchmark
 python python/run_benchmarks.py
 python python/plot_results.py

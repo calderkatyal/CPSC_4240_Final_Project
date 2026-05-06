@@ -14,7 +14,6 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 # Collect all CUDA source files
 set(SOURCES
     src/flash_attn_v1.cu
-    src/flash_attn_v2.cu
     src/ablations.cu
     src/benchmark.cu
 )

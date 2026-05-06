@@ -25,7 +25,6 @@ COLORS = {
     SPEEDUP_BASELINE: "#ff7f0e",
     "Simplified FA1": "#1f77b4",
     "Official FlashAttention-1 (fp16)": "#9467bd",
-    "Official FlashAttention-2 (fp16)": "#8c564b",
     "Ablation: no tensor cores": "#d62728",
     "Ablation: no vectorized loads": "#bcbd22",
     "Ablation: no online softmax": "#7f7f7f",
@@ -36,12 +35,13 @@ MARKERS = {
     SPEEDUP_BASELINE: "D",
     "Simplified FA1": "o",
     "Official FlashAttention-1 (fp16)": "P",
-    "Official FlashAttention-2 (fp16)": "X",
     "Ablation: no tensor cores": "s",
     "Ablation: no vectorized loads": "v",
     "Ablation: no online softmax": "x",
     "Ablation: no SRAM tiling": "h",
 }
+
+ALLOWED_METHODS = set(COLORS)
 
 
 def load_csv(path: Path) -> list[dict]:
@@ -53,6 +53,8 @@ def group_by_method(rows: list[dict]) -> dict[str, dict[str, list[float]]]:
     groups = defaultdict(lambda: {"seq_lens": [], "times": [], "memory": [], "errors": []})
     for row in rows:
         method = row["method"]
+        if method not in ALLOWED_METHODS:
+            continue
         groups[method]["seq_lens"].append(int(row["seq_len"]))
         groups[method]["times"].append(float(row["time_ms"]))
         groups[method]["memory"].append(int(row["memory_bytes"]))
@@ -91,7 +93,6 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
         SPEEDUP_BASELINE,
         "Simplified FA1",
         "Official FlashAttention-1 (fp16)",
-        "Official FlashAttention-2 (fp16)",
     ]
     for method in priority:
         if method not in groups:

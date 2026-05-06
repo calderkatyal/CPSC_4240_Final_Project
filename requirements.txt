@@ -3,11 +3,10 @@
 # Recommended cluster stack for RTX 5000 Ada:
 #   module load CUDA/12.1.1
 #
-# We benchmark official FlashAttention-1 and FlashAttention-2 inside one shared
-# Python environment. CUDA 12.1.1 is the cleanest common choice because:
-#   - official FA1 requires CUDA 11.4+ and checks that nvcc matches PyTorch's CUDA
-#   - official FA2 requires CUDA 12.0+
-#   - cu121 PyTorch wheels match the CUDA/12.1.1 module well
+# We benchmark the official FlashAttention-1 forward kernel inside the same
+# Python environment as the local benchmark. CUDA 12.1.1 is a clean choice
+# because official FA1 requires CUDA 11.4+ and checks that nvcc matches
+# PyTorch's CUDA.
 #
 # Shared environment bootstrap:
 #   python -m venv venv
@@ -23,19 +22,12 @@
 #       https://github.com/Dao-AILab/flash-attention.git flash-attn-fa1
 #   cd ..
 #
-# Install the official baselines:
+# Build the official FA1 extension in place:
 #   cd external/flash-attn-fa1 && python setup.py build_ext --inplace
-#   pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.6/flash_attn-2.5.6+cu122torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 #
-# Benchmark them from the shared environment:
+# Benchmark it from the shared environment:
 #   cd /path/to/project
-#   python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
-#   python python/benchmark_official_flash_attn.py --version fa2
-#
-# Note:
-#   Official FA1 and FA2 both use the top-level Python package name `flash_attn`.
-#   In this project, FA1 is imported from a checked-out source tree via
-#   `--source-dir`, while FA2 is imported from the installed wheel.
+#   python python/benchmark_official_flash_attn.py --source-dir external/flash-attn-fa1
 
 numpy>=1.26,<2
 matplotlib>=3.8,<4

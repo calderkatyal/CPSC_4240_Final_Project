@@ -3,11 +3,6 @@ GPU benchmark runner for the local FA1 kernel.
 
 This script runs the local CUDA benchmark binary and then merges any separately
 generated official FlashAttention CSVs into one comparison file.
-
-Official FlashAttention-1 and FlashAttention-2 should be benchmarked from
-separate invocations of `python/benchmark_official_flash_attn.py`. FA1 is
-imported from a source tree via `--source-dir`, while FA2 is imported from the
-installed `flash_attn` wheel.
 """
 
 from __future__ import annotations
@@ -56,7 +51,6 @@ def merge_results() -> list[dict]:
     optional_paths = [
         RESULTS_DIR / "official_pytorch_baseline_results.csv",
         RESULTS_DIR / "official_flash_attn_v1_results.csv",
-        RESULTS_DIR / "official_flash_attn_v2_results.csv",
     ]
     for path in optional_paths:
         if path.exists():

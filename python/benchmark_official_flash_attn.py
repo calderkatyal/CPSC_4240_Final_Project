@@ -1,10 +1,8 @@
 """
-Benchmark one installed official FlashAttention version.
+Benchmark the official FlashAttention-1 forward kernel.
 
-Examples:
-  python python/benchmark_official_flash_attn.py --version fa1
-  python python/benchmark_official_flash_attn.py --version fa2
-  python python/benchmark_official_flash_attn.py --version fa1 --source-dir external/flash-attn-fa1
+Example:
+  python python/benchmark_official_flash_attn.py --source-dir external/flash-attn-fa1
 """
 
 from __future__ import annotations
@@ -121,16 +119,7 @@ def get_fa1_callable():
     return call
 
 
-def get_fa2_callable():
-    from flash_attn import flash_attn_qkvpacked_func
-
-    def call(qkv: torch.Tensor, causal: bool) -> torch.Tensor:
-        return flash_attn_qkvpacked_func(qkv, dropout_p=0.0, softmax_scale=None, causal=causal)
-
-    return call
-
-
-def run_benchmarks(version: str, source_dir: str | None) -> list[dict]:
+def run_benchmarks(source_dir: str | None) -> list[dict]:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required. Run this on a CUDA-enabled machine.")
 
@@ -142,16 +131,9 @@ def run_benchmarks(version: str, source_dir: str | None) -> list[dict]:
     seq_lens = [128, 256, 512, 1024, 2048, 4096]
     causal = True
 
-    if version == "fa1":
-        label = "Official FlashAttention-1 (fp16)"
-        flash_fn = get_fa1_callable()
-        out_path = RESULTS_DIR / "official_flash_attn_v1_results.csv"
-    elif version == "fa2":
-        label = "Official FlashAttention-2 (fp16)"
-        flash_fn = get_fa2_callable()
-        out_path = RESULTS_DIR / "official_flash_attn_v2_results.csv"
-    else:
-        raise ValueError(f"Unsupported version: {version}")
+    label = "Official FlashAttention-1 (fp16)"
+    flash_fn = get_fa1_callable()
+    out_path = RESULTS_DIR / "official_flash_attn_v1_results.csv"
 
     rows = []
     baseline_rows = []
@@ -166,12 +148,8 @@ def run_benchmarks(version: str, source_dir: str | None) -> list[dict]:
         cu_seqlens = torch.arange(0, (B + 1) * N, step=N, dtype=torch.int32, device=device)
 
         with torch.no_grad():
-            if version == "fa1":
-                out = flash_fn(qkv_unpadded, cu_seqlens, N, causal=causal)
-                timed_flash = lambda: flash_fn(qkv_unpadded, cu_seqlens, N, causal=causal)
-            else:
-                out = flash_fn(qkv, causal=causal)
-                timed_flash = lambda: flash_fn(qkv, causal=causal)
+            out = flash_fn(qkv_unpadded, cu_seqlens, N, causal=causal)
+            timed_flash = lambda: flash_fn(qkv_unpadded, cu_seqlens, N, causal=causal)
             ref = torch_reference_attention(
                 q.permute(0, 2, 1, 3),
                 k.permute(0, 2, 1, 3),
@@ -216,17 +194,16 @@ def run_benchmarks(version: str, source_dir: str | None) -> list[dict]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", choices=["fa1", "fa2"], required=True)
     parser.add_argument(
         "--source-dir",
-        help="Optional built official flash-attn source tree to import from, used for FA1.",
+        help="Built flash-attention v1.0.9 source tree to import from.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    run_benchmarks(args.version, args.source_dir)
+    run_benchmarks(args.source_dir)
 
 
 if __name__ == "__main__":
