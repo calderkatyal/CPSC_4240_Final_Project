@@ -54,7 +54,7 @@ def torch_reference_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 
 
 def attention_pytorch_qkvpacked(qkv: torch.Tensor, causal: bool) -> torch.Tensor:
-    """PyTorch eager attention baseline adapted from the official FA benchmark script."""
+    """PyTorch baseline adapted from the official FA benchmark script."""
     batch_size, seqlen, _, nheads, d = qkv.shape
     q, k, v = qkv.unbind(dim=2)
     q = q.permute(0, 2, 1, 3).reshape(batch_size * nheads, seqlen, d)
