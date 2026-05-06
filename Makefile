@@ -22,4 +22,7 @@ run: benchmark
 
 clean:
 	rm -f benchmark
-	rm -f results/*.csv results/*.pdf
+	rm -f results/benchmark_results.csv \
+	      results/gpu_comparison_results.csv \
+	      results/table_rows.tex
+	rm -f results/*.pdf
