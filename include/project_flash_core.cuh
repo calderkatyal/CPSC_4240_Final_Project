@@ -9,8 +9,9 @@ namespace project_flash {
 namespace wmma = nvcuda::wmma;
 
 // Shared memory padding (in halfs) to break bank-conflict alignment.
-// Stride d+2 gives bank offset of 1 per row, eliminating systematic conflicts.
-constexpr int SMEM_PAD = 2;
+// Must be a multiple of 8 so that each row stays 16-byte aligned for WMMA.
+// Stride d+8 = 72 for d=64: (72/2) % 32 = 4, avoiding systematic conflicts.
+constexpr int SMEM_PAD = 8;
 
 // ---- Legacy helpers used by ablation kernels (unpadded strides) --------
 
