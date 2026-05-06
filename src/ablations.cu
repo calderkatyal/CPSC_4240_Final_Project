@@ -33,7 +33,7 @@ __global__ void two_pass_find_max_kernel(
     const project_in_t* q_base = Q + batch_head * N * d;
     const project_in_t* k_base = K + batch_head * N * d;
 
-    extern __shared__ unsigned char smem_raw[];
+    extern __shared__ __align__(32) unsigned char smem_raw[];
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d;
     float* s_scores = reinterpret_cast<float*>(s_kt + PROJECT_BLOCK_N * d);
@@ -112,7 +112,7 @@ __global__ void two_pass_attn_kernel(
     const project_in_t* v_base = V + batch_head * N * d;
     project_out_t* o_base = O + batch_head * N * d;
 
-    extern __shared__ unsigned char smem_raw[];
+    extern __shared__ __align__(32) unsigned char smem_raw[];
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d;
     project_in_t* s_v = s_kt + PROJECT_BLOCK_N * d;
@@ -199,7 +199,7 @@ __global__ void flash_attn_no_tiling_kernel(
     const project_in_t* v_base = V + batch_head * N * d;
     project_out_t* o_base = O + batch_head * N * d;
 
-    extern __shared__ unsigned char smem_raw[];
+    extern __shared__ __align__(32) unsigned char smem_raw[];
     project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
 
     const project_in_t zero = __float2half(0.0f);

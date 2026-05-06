@@ -44,7 +44,7 @@ static __global__ void flash_attention_splitkv_partial_kernel(
     if (PROJECT_BLOCK_M * bn_padded > kv_buf_elems)
         kv_buf_elems = PROJECT_BLOCK_M * bn_padded;
 
-    extern __shared__ unsigned char smem_raw[];
+    extern __shared__ __align__(32) unsigned char smem_raw[];
     project_in_t* s_q  = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d_padded;
     project_in_t* s_v  = s_kt + kv_buf_elems;

@@ -8,9 +8,10 @@ namespace project_flash {
 
 namespace wmma = nvcuda::wmma;
 
-// Shared memory padding (in halfs) to break bank-conflict alignment.
-// Must be a multiple of 8 so that each row stays 16-byte aligned for WMMA.
-// Stride d+8 = 72 for d=64: (72/2) % 32 = 4, avoiding systematic conflicts.
+// Shared-memory padding (in half elements) for the tensor-core paths.
+// The padded leading dimensions must remain multiples of 8 half values so that
+// WMMA load_matrix_sync stays legal, while also shifting rows away from the
+// worst shared-memory bank-alignment pattern.
 constexpr int SMEM_PAD = 8;
 
 // ---- Legacy helpers used by ablation kernels (unpadded strides) --------
@@ -152,7 +153,7 @@ static __global__ void flash_attention_core_kernel(
         kv_buf_elems = PROJECT_BLOCK_M * bn_padded;
 
     // ---- Shared memory layout ----
-    extern __shared__ unsigned char smem_raw[];
+    extern __shared__ __align__(32) unsigned char smem_raw[];
     project_in_t* s_q  = reinterpret_cast<project_in_t*>(smem_raw);
     project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d_padded;
     project_in_t* s_v  = s_kt + kv_buf_elems;
