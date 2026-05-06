@@ -27,6 +27,8 @@ COLORS = {
     "FA2-inspired extension": "#2ca02c",
     "Official FlashAttention-1 (fp16)": "#9467bd",
     "Official FlashAttention-2 (fp16)": "#8c564b",
+    "Ablation: no tensor cores": "#d62728",
+    "Ablation: no vectorized loads": "#bcbd22",
     "Ablation: no online softmax": "#7f7f7f",
     "Ablation: no SRAM tiling": "#17becf",
 }
@@ -37,6 +39,8 @@ MARKERS = {
     "FA2-inspired extension": "^",
     "Official FlashAttention-1 (fp16)": "P",
     "Official FlashAttention-2 (fp16)": "X",
+    "Ablation: no tensor cores": "s",
+    "Ablation: no vectorized loads": "v",
     "Ablation: no online softmax": "x",
     "Ablation: no SRAM tiling": "h",
 }
@@ -163,6 +167,8 @@ def plot_ablation_bars(groups, title: str, output_path: Path) -> None:
     candidates = [
         "Simplified FA1",
         "FA2-inspired extension",
+        "Ablation: no tensor cores",
+        "Ablation: no vectorized loads",
         "Ablation: no online softmax",
         "Ablation: no SRAM tiling",
     ]

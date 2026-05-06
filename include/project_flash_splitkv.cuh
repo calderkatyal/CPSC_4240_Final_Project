@@ -4,6 +4,7 @@
 
 namespace project_flash {
 
+template<int HEAD_DIM>
 static __global__ void flash_attention_splitkv_partial_kernel(
     const project_in_t* __restrict__ Q,
     const project_in_t* __restrict__ K,
@@ -13,10 +14,16 @@ static __global__ void flash_attention_splitkv_partial_kernel(
     float* __restrict__ partial_o,
     int num_splits,
     int N,
-    int d,
-    float scale,
+    float scale_l2,
     bool causal
 ) {
+    constexpr int d = HEAD_DIM;
+    constexpr int num_o_frags = HEAD_DIM / PROJECT_TILE;
+    constexpr int d_padded = HEAD_DIM + SMEM_PAD;
+    constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
+    constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
+    constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
+
     const int batch_head = blockIdx.z;
     const int split_idx  = blockIdx.y;
     const int warp_id    = threadIdx.x / PROJECT_WARP_SIZE;
@@ -37,35 +44,20 @@ static __global__ void flash_attention_splitkv_partial_kernel(
     const project_in_t* k_base = K + batch_head * N * d;
     const project_in_t* v_base = V + batch_head * N * d;
 
-    const int d_padded  = d + SMEM_PAD;
-    const int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-
-    int kv_buf_elems = PROJECT_BLOCK_N * d_padded;
-    if (PROJECT_BLOCK_M * bn_padded > kv_buf_elems)
-        kv_buf_elems = PROJECT_BLOCK_M * bn_padded;
-
     extern __shared__ __align__(32) unsigned char smem_raw[];
     project_in_t* s_q  = reinterpret_cast<project_in_t*>(smem_raw);
-    project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d_padded;
-    project_in_t* s_v  = s_kt + kv_buf_elems;
-    project_in_t* s_p  = s_kt;
+    project_in_t* s_kv = s_q + PROJECT_BLOCK_M * d_padded;
+    project_in_t* s_p  = s_kv;
 
     project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d_padded;
     project_in_t* s_p_warp = s_p + warp_id * PROJECT_TILE * bn_padded;
 
-    const project_in_t zero = __float2half(0.0f);
+    load_padded_rowmajor_tile<PROJECT_BLOCK_M, d, d_padded, true>(
+        s_q, q_base, q_block_start, N
+    );
 
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d_padded;
-         idx += blockDim.x) {
-        int row = idx / d_padded;
-        int col = idx % d_padded;
-        int gr  = q_block_start + row;
-        s_q[idx] = (col < d && gr < N) ? q_base[gr * d + col] : zero;
-    }
-
-    const int num_o_frags = d / PROJECT_TILE;
     wmma::fragment<wmma::accumulator, PROJECT_TILE, PROJECT_TILE,
-                   PROJECT_TILE, float> o_frag[PROJECT_MAX_D / PROJECT_TILE];
+                   PROJECT_TILE, float> o_frag[num_o_frags];
     for (int f = 0; f < num_o_frags; f++)
         wmma::fill_fragment(o_frag[f], 0.0f);
 
@@ -87,19 +79,30 @@ static __global__ void flash_attention_splitkv_partial_kernel(
     for (int kv_tile = kv_tile_begin; kv_tile < kv_tile_end; kv_tile++) {
         const int kv_start = kv_tile * PROJECT_BLOCK_N;
 
-        for (int idx = threadIdx.x; idx < PROJECT_BLOCK_N * d_padded;
-             idx += blockDim.x) {
-            int row = idx / d_padded;
-            int col = idx % d_padded;
-            int gr  = kv_start + row;
-            project_in_t kv = zero, vv = zero;
-            if (col < d && gr < N) {
-                kv = k_base[gr * d + col];
-                vv = v_base[gr * d + col];
+        load_padded_rowmajor_tile<PROJECT_BLOCK_N, d, d_padded, true>(
+            s_kv, v_base, kv_start, N
+        );
+        __syncthreads();
+
+        wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
+                       PROJECT_TILE, project_in_t,
+                       wmma::row_major> v_frag[PROJECT_K_TILES_PER_BLOCK][num_o_frags];
+        #pragma unroll
+        for (int kk = 0; kk < PROJECT_BLOCK_N; kk += PROJECT_TILE) {
+            #pragma unroll
+            for (int dd = 0; dd < d; dd += PROJECT_TILE) {
+                wmma::load_matrix_sync(
+                    v_frag[kk / PROJECT_TILE][dd / PROJECT_TILE],
+                    s_kv + kk * d_padded + dd,
+                    d_padded
+                );
             }
-            s_kt[idx] = kv;
-            s_v[idx]  = vv;
         }
+
+        __syncthreads();
+        load_padded_rowmajor_tile<PROJECT_BLOCK_N, d, d_padded, true>(
+            s_kv, k_base, kv_start, N
+        );
         __syncthreads();
 
         wmma::fragment<wmma::accumulator, PROJECT_TILE, PROJECT_TILE,
@@ -108,22 +111,29 @@ static __global__ void flash_attention_splitkv_partial_kernel(
         #pragma unroll
         for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
             wmma::fill_fragment(sf[tn], 0.0f);
+        }
+        #pragma unroll
+        for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
+            wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
+                           PROJECT_TILE, project_in_t,
+                           wmma::row_major> a;
+            wmma::load_matrix_sync(a, s_q_warp + k0, d_padded);
+
             #pragma unroll
-            for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
-                wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
-                               PROJECT_TILE, project_in_t,
-                               wmma::row_major> a;
+            for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
                 wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
                                PROJECT_TILE, project_in_t,
                                wmma::col_major> b;
-                wmma::load_matrix_sync(a, s_q_warp + k0, d_padded);
                 wmma::load_matrix_sync(
-                    b, s_kt + tn * PROJECT_TILE * d_padded + k0, d_padded);
+                    b, s_kv + tn * PROJECT_TILE * d_padded + k0, d_padded);
                 wmma::mma_sync(sf[tn], a, b, sf[tn]);
             }
+        }
+        #pragma unroll
+        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
             #pragma unroll
             for (int i = 0; i < sf[tn].num_elements; i++)
-                sf[tn].x[i] *= scale;
+                sf[tn].x[i] *= scale_l2;
         }
 
         __syncthreads();
@@ -165,8 +175,8 @@ static __global__ void flash_attention_splitkv_partial_kernel(
 
         const float nm0 = fmaxf(m0, mx0);
         const float nm1 = fmaxf(m1, mx1);
-        const float a0  = expf(m0 - nm0);
-        const float a1  = expf(m1 - nm1);
+        const float a0  = exp2f(m0 - nm0);
+        const float a1  = exp2f(m1 - nm1);
 
         #pragma unroll
         for (int f = 0; f < num_o_frags; f++) {
@@ -187,23 +197,23 @@ static __global__ void flash_attention_splitkv_partial_kernel(
             float p2 = 0, p3 = 0, p6 = 0, p7 = 0;
             if (r0v) {
                 if (c0 < N && (!causal || c0 <= global_row0))
-                    p0 = expf(sf[tn].x[0] - nm0);
+                    p0 = exp2f(sf[tn].x[0] - nm0);
                 if (c1 < N && (!causal || c1 <= global_row0))
-                    p1 = expf(sf[tn].x[1] - nm0);
+                    p1 = exp2f(sf[tn].x[1] - nm0);
                 if (c4 < N && (!causal || c4 <= global_row0))
-                    p4 = expf(sf[tn].x[4] - nm0);
+                    p4 = exp2f(sf[tn].x[4] - nm0);
                 if (c5 < N && (!causal || c5 <= global_row0))
-                    p5 = expf(sf[tn].x[5] - nm0);
+                    p5 = exp2f(sf[tn].x[5] - nm0);
             }
             if (r1v) {
                 if (c0 < N && (!causal || c0 <= global_row1))
-                    p2 = expf(sf[tn].x[2] - nm1);
+                    p2 = exp2f(sf[tn].x[2] - nm1);
                 if (c1 < N && (!causal || c1 <= global_row1))
-                    p3 = expf(sf[tn].x[3] - nm1);
+                    p3 = exp2f(sf[tn].x[3] - nm1);
                 if (c4 < N && (!causal || c4 <= global_row1))
-                    p6 = expf(sf[tn].x[6] - nm1);
+                    p6 = exp2f(sf[tn].x[6] - nm1);
                 if (c5 < N && (!causal || c5 <= global_row1))
-                    p7 = expf(sf[tn].x[7] - nm1);
+                    p7 = exp2f(sf[tn].x[7] - nm1);
             }
 
             sum0 += p0 + p1 + p4 + p5;
@@ -233,19 +243,15 @@ static __global__ void flash_attention_splitkv_partial_kernel(
         __syncwarp();
 
         #pragma unroll
-        for (int dd = 0; dd < d; dd += PROJECT_TILE) {
+        for (int kk = 0; kk < PROJECT_BLOCK_N; kk += PROJECT_TILE) {
+            wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
+                           PROJECT_TILE, project_in_t,
+                           wmma::row_major> pf;
+            wmma::load_matrix_sync(pf, s_p_warp + kk, bn_padded);
             #pragma unroll
-            for (int kk = 0; kk < PROJECT_BLOCK_N; kk += PROJECT_TILE) {
-                wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
-                               PROJECT_TILE, project_in_t,
-                               wmma::row_major> pf;
-                wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
-                               PROJECT_TILE, project_in_t,
-                               wmma::row_major> vf;
-                wmma::load_matrix_sync(pf, s_p_warp + kk, bn_padded);
-                wmma::load_matrix_sync(
-                    vf, s_v + kk * d_padded + dd, d_padded);
-                wmma::mma_sync(o_frag[dd / PROJECT_TILE], pf, vf,
+            for (int dd = 0; dd < d; dd += PROJECT_TILE) {
+                wmma::mma_sync(o_frag[dd / PROJECT_TILE], pf,
+                               v_frag[kk / PROJECT_TILE][dd / PROJECT_TILE],
                                o_frag[dd / PROJECT_TILE]);
             }
         }
@@ -314,7 +320,7 @@ static __global__ void flash_attention_splitkv_combine_kernel(
         int sri = ((split_idx * gridDim.z + batch_head) * N) + row;
         float l_local = partial_l[sri];
         if (l_local > 0.0f)
-            global_l += l_local * expf(partial_m[sri] - global_m);
+            global_l += l_local * exp2f(partial_m[sri] - global_m);
     }
 
     project_out_t* o_base = O + batch_head * N * d;
@@ -331,7 +337,7 @@ static __global__ void flash_attention_splitkv_combine_kernel(
             float l_local = partial_l[sri];
             if (l_local > 0.0f)
                 accum += partial_o[sri * d + dd]
-                    * expf(partial_m[sri] - global_m);
+                    * exp2f(partial_m[sri] - global_m);
         }
         o_base[row * d + dd] = accum / global_l;
     }
@@ -350,6 +356,71 @@ inline size_t splitkv_workspace_bytes(int B, int H, int N, int d, int num_splits
     return static_cast<size_t>(num_splits) * B * H * N * (2 * sizeof(float) + d * sizeof(float));
 }
 
+template<int HEAD_DIM>
+inline void launch_flash_attention_splitkv_hdim(
+    const project_in_t* d_Q,
+    const project_in_t* d_K,
+    const project_in_t* d_V,
+    project_out_t* d_O,
+    int B,
+    int H,
+    int N,
+    float scale_l2,
+    bool causal
+) {
+    constexpr int d_padded = HEAD_DIM + SMEM_PAD;
+    constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
+    constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
+    constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
+
+    int BH = B * H;
+    int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
+    int num_splits = choose_splitkv_splits(B, H, N);
+    if (num_splits <= 1) {
+        launch_flash_attention_core_hdim<HEAD_DIM, true>(
+            d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+        );
+        return;
+    }
+
+    float* partial_m_ptr = nullptr;
+    float* partial_l_ptr = nullptr;
+    float* partial_o_ptr = nullptr;
+    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_m_ptr), (size_t)num_splits * BH * N * sizeof(float)));
+    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_l_ptr), (size_t)num_splits * BH * N * sizeof(float)));
+    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_o_ptr), (size_t)num_splits * BH * N * HEAD_DIM * sizeof(float)));
+
+    size_t partial_smem = 0;
+    partial_smem += PROJECT_BLOCK_M * d_padded * sizeof(project_in_t);
+    partial_smem += kv_buf_elems * sizeof(project_in_t);
+
+    dim3 block(PROJECT_THREADS);
+    dim3 grid_partial(num_q_tiles, num_splits, BH);
+    if (partial_smem >= 48 * 1024) {
+        CUDA_CHECK(cudaFuncSetAttribute(
+            flash_attention_splitkv_partial_kernel<HEAD_DIM>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            partial_smem
+        ));
+    }
+    flash_attention_splitkv_partial_kernel<HEAD_DIM><<<grid_partial, block, partial_smem>>>(
+        d_Q, d_K, d_V, partial_m_ptr, partial_l_ptr, partial_o_ptr,
+        num_splits, N, scale_l2, causal
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    dim3 grid_combine(num_q_tiles, 1, BH);
+    dim3 combine_block(PROJECT_BLOCK_M);
+    flash_attention_splitkv_combine_kernel<<<grid_combine, combine_block>>>(
+        partial_m_ptr, partial_l_ptr, partial_o_ptr, d_O, num_splits, N, HEAD_DIM
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(tracked_cuda_free(partial_m_ptr));
+    CUDA_CHECK(tracked_cuda_free(partial_l_ptr));
+    CUDA_CHECK(tracked_cuda_free(partial_o_ptr));
+}
+
 inline void launch_flash_attention_splitkv(
     const project_in_t* d_Q,
     const project_in_t* d_K,
@@ -363,59 +434,52 @@ inline void launch_flash_attention_splitkv(
     bool causal
 ) {
     check_supported_head_dim(d);
-    int BH = B * H;
-    int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
-    int num_splits = choose_splitkv_splits(B, H, N);
-    if (num_splits <= 1) {
-        launch_flash_attention_core(
-            d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
-        );
-        return;
+    const float scale_l2 = scale * PROJECT_LOG2E;
+    switch (d) {
+        case 16:
+            launch_flash_attention_splitkv_hdim<16>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 32:
+            launch_flash_attention_splitkv_hdim<32>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 48:
+            launch_flash_attention_splitkv_hdim<48>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 64:
+            launch_flash_attention_splitkv_hdim<64>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 80:
+            launch_flash_attention_splitkv_hdim<80>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 96:
+            launch_flash_attention_splitkv_hdim<96>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 112:
+            launch_flash_attention_splitkv_hdim<112>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 128:
+            launch_flash_attention_splitkv_hdim<128>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        default:
+            fprintf(stderr, "Unsupported head dimension d=%d in split-KV launcher.\n", d);
+            exit(EXIT_FAILURE);
     }
-
-    float* partial_m_ptr = nullptr;
-    float* partial_l_ptr = nullptr;
-    float* partial_o_ptr = nullptr;
-    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_m_ptr), (size_t)num_splits * BH * N * sizeof(float)));
-    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_l_ptr), (size_t)num_splits * BH * N * sizeof(float)));
-    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_o_ptr), (size_t)num_splits * BH * N * d * sizeof(float)));
-
-    const int d_padded  = d + SMEM_PAD;
-    const int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-    int kv_buf_elems = PROJECT_BLOCK_N * d_padded;
-    if (PROJECT_BLOCK_M * bn_padded > kv_buf_elems)
-        kv_buf_elems = PROJECT_BLOCK_M * bn_padded;
-
-    size_t partial_smem = 0;
-    partial_smem += PROJECT_BLOCK_M * d_padded * sizeof(project_in_t);
-    partial_smem += kv_buf_elems * sizeof(project_in_t);
-    partial_smem += PROJECT_BLOCK_N * d_padded * sizeof(project_in_t);
-
-    dim3 block(PROJECT_THREADS);
-    dim3 grid_partial(num_q_tiles, num_splits, BH);
-    if (partial_smem >= 48 * 1024) {
-        CUDA_CHECK(cudaFuncSetAttribute(
-            flash_attention_splitkv_partial_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            partial_smem
-        ));
-    }
-    flash_attention_splitkv_partial_kernel<<<grid_partial, block, partial_smem>>>(
-        d_Q, d_K, d_V, partial_m_ptr, partial_l_ptr, partial_o_ptr,
-        num_splits, N, d, scale, causal
-    );
-    CUDA_CHECK(cudaGetLastError());
-
-    dim3 grid_combine(num_q_tiles, 1, BH);
-    dim3 combine_block(PROJECT_BLOCK_M);
-    flash_attention_splitkv_combine_kernel<<<grid_combine, combine_block>>>(
-        partial_m_ptr, partial_l_ptr, partial_o_ptr, d_O, num_splits, N, d
-    );
-    CUDA_CHECK(cudaGetLastError());
-
-    CUDA_CHECK(tracked_cuda_free(partial_m_ptr));
-    CUDA_CHECK(tracked_cuda_free(partial_l_ptr));
-    CUDA_CHECK(tracked_cuda_free(partial_o_ptr));
 }
 
 }  // namespace project_flash

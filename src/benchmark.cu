@@ -3,7 +3,8 @@
 // This benchmark exercises:
 //   - a simplified FA1-style kernel with tensor-core score tiles
 //   - FA2-style split-KV sequence parallelism
-//   - FA1 ablations for online softmax and SRAM tiling
+//   - FA1 ablations for tensor cores, vectorized loads, online softmax,
+//     and SRAM tiling
 //
 // Correctness is checked against a host-side float32 reference. The shared
 // PyTorch baseline and official FlashAttention baselines are benchmarked from
@@ -154,6 +155,8 @@ int main(int argc, char** argv) {
     MethodEntry methods[] = {
         {"Simplified FA1", flash_attention_v1},
         {"FA2-inspired extension", flash_attention_v2},
+        {"Ablation: no tensor cores", flash_attention_v1_no_tensor_cores},
+        {"Ablation: no vectorized loads", flash_attention_v1_no_vectorized_loads},
         {"Ablation: no online softmax", flash_attention_v1_no_online_softmax},
         {"Ablation: no SRAM tiling", flash_attention_v1_no_tiling},
     };

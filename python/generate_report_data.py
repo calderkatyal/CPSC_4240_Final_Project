@@ -27,6 +27,8 @@ SPEEDUP_METHODS = [
 
 ABLATION_METHODS = [
     ("Simplified FA1", "Simplified FA1"),
+    ("Ablation: no tensor cores", "Ablation: no tensor cores"),
+    ("Ablation: no vectorized loads", "Ablation: no vectorized loads"),
     ("Ablation: no online softmax", "Ablation: no online softmax"),
     ("Ablation: no SRAM tiling", "Ablation: no SRAM tiling"),
 ]
@@ -130,6 +132,8 @@ def make_ablation_rows(lookup: dict[tuple[str, int], dict[str, str]]) -> str:
     for method_key, label in ABLATION_METHODS:
         runtime = row_value(lookup, method_key, ABLATION_SEQ, "time_ms")
         error = row_value(lookup, method_key, ABLATION_SEQ, "max_error")
+        if runtime is None and error is None:
+            continue
         if naive is None or runtime is None:
             speedup = r"\blankcell"
         else:

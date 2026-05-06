@@ -81,10 +81,11 @@ constexpr int PROJECT_TILE = 16;
 constexpr int PROJECT_WARP_SIZE = 32;
 constexpr int PROJECT_Q_WARPS = 4;
 constexpr int PROJECT_BLOCK_M = PROJECT_TILE * PROJECT_Q_WARPS;
-constexpr int PROJECT_BLOCK_N = 64;
+constexpr int PROJECT_BLOCK_N = 128;
 constexpr int PROJECT_K_TILES_PER_BLOCK = PROJECT_BLOCK_N / PROJECT_TILE;
 constexpr int PROJECT_THREADS = PROJECT_WARP_SIZE * PROJECT_Q_WARPS;
 constexpr int PROJECT_MAX_D = 128;
+constexpr float PROJECT_LOG2E = 1.4426950408889634f;
 
 inline void check_supported_head_dim(int d) {
     if (d <= 0 || d > PROJECT_MAX_D || (d % PROJECT_TILE) != 0) {
@@ -118,6 +119,8 @@ inline void convert_float_to_project_input(
 inline void print_project_precision_summary(int d) {
     printf("Project kernel precision: FP16 Q/K/V inputs, FP32 softmax/output accumulation\n");
     printf("Tensor-core score path: enabled for d=%d (multiple of %d)\n", d, PROJECT_TILE);
+    printf("Thread-block tile sizes: Q-block=%d rows, KV-block=%d rows\n",
+           PROJECT_BLOCK_M, PROJECT_BLOCK_N);
 }
 
 inline int project_num_splits_heuristic(

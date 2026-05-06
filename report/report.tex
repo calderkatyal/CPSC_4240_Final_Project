@@ -64,7 +64,7 @@ Our project goal is narrower than reimplementing the entire official repository.
     \item Once a simplified FlashAttention-1 kernel is implemented, does a key forward-only idea from FlashAttention-2 still help?
     \item How large is the gap between a compact educational CUDA implementation and the production \texttt{flash\_attn} module?
 \end{enumerate}
-To answer these questions, we implement a GPU-only benchmark suite with a shared PyTorch eager-attention baseline, a simplified FlashAttention-1 core, one later-version-inspired extension, and two ablations that remove key FA1 ingredients. The benchmark suite is designed to compare these project kernels against both official FlashAttention-1 and official FlashAttention-2 on the same CUDA machine.
+To answer these questions, we implement a GPU-only benchmark suite with a shared PyTorch eager-attention baseline, a simplified FlashAttention-1 core, one later-version-inspired extension, and four ablations that remove key FA1 ingredients. The benchmark suite is designed to compare these project kernels against both official FlashAttention-1 and official FlashAttention-2 on the same CUDA machine.
 
 \section{Background}
 \subsection{Attention and the memory bottleneck}
@@ -204,12 +204,14 @@ o_i &= \frac{1}{\ell_i} \sum_r o_i^{(r)} e^{m_i^{(r)} - m_i}.
 This extension is motivated by the upstream split-KV path and its \texttt{num\_splits} heuristic in the official implementation. It is not the entire FlashAttention-2 redesign, but it does capture one central implementation idea that remains meaningful outside a particular model-serving stack \citep{dao2023flashattention2}.
 
 \subsection{Ablations}
-We include two ablation kernels so that the report can answer which FA1 ingredients matter most.
+We include four ablation kernels so that the report can answer which FA1 ingredients matter most.
 \begin{itemize}
+    \item \textbf{No tensor cores.} This kernel keeps the same staged query/KV tiles, online-softmax recurrence, and fused forward pass, but replaces the WMMA score/output updates with scalar per-thread math.
+    \item \textbf{No vectorized loads.} This kernel keeps the same FA1 core algorithm, but disables the 16-byte Q/K/V tile loads used by the main path.
     \item \textbf{No online softmax.} This kernel keeps the same block structure, staged query/KV blocks, and tensor-core score subtiles, but replaces the online recurrence with a two-pass computation.
-    \item \textbf{No SRAM tiling.} This kernel keeps the same outer block structure and exact online-softmax logic, but loads key/value rows directly from global memory instead of staging K/V blocks in shared memory.
+    \item \textbf{No SRAM tiling.} This kernel keeps the same outer block structure and exact online-softmax logic, but loads key/value rows directly from global memory instead of staging K/V blocks in shared memory. In our compact codebase this is the broadest structural ablation, since removing the staged K/V tile also removes the convenient tensor-core score path.
 \end{itemize}
-The ablations are important because they let us isolate whether the main gain comes from the online recurrence, from the memory-hierarchy reorganization, or from both together.
+The ablations are important because they let us isolate whether the main gain comes from tensor-core math, vectorized tile movement, the online recurrence, or the memory-hierarchy reorganization.
 
 \begin{table}[H]
     \centering
@@ -236,8 +238,10 @@ Two implementation choices are especially important for interpreting the benchma
 
 The simplified FA1 kernel and the FA2-inspired kernel also share most of the same surrounding choices: both perform exact causal attention, both keep the output accumulation in FP32, and both use the same correctness reference in the benchmark binary. This is important because it means the FA1-versus-FA2 comparison is not confounded by datatype changes, approximation, or a different masking convention. The intended interpretation is therefore narrow and clean: if FA2-inspired split-KV helps, it should help because of additional sequence-level parallelism and altered work partitioning, not because the kernels are doing different mathematical tasks.
 
+To stay close to the official FlashAttention-1 source without making the codebase explode in size, the main FA1 path also adopts several low-level choices from upstream: compile-time dispatch for supported head dimensions, a native-like larger KV tile for the $d=64$ benchmark regime, 16-byte vectorized tile loads for $Q/K/V$, a shared K/V SRAM buffer with V fragments held in registers, and the $\exp_2$ / $\log_2 e$ softmax scaling path used by the native kernel. These are all symmetry-preserving implementation choices rather than benchmark hacks: they apply equally across sequence lengths and do not change the exact attention computation.
+
 \subsection{Kernel layout}
-Our CUDA implementation uses $16 \times 16$ WMMA fragments, but the full thread-block work unit is larger: each block processes a $64$-row query block and iterates over the sequence in $64$-key / $64$-value blocks. The query block and the current K/V block are staged in shared memory, while each active query row maintains its running maximum, running normalization constant, and running output vector in FP32 across KV-block iterations. Once all KV blocks have been processed, the output accumulator is normalized and written back to global memory.
+Our CUDA implementation uses $16 \times 16$ WMMA fragments, but the full thread-block work unit is larger: each block processes a $64$-row query block and iterates over the sequence in $128$-key / $128$-value blocks. The query block and the current KV working set are staged on chip, with the value fragments loaded into registers before the shared K/V buffer is reused for the key tile. Each active query row maintains its running maximum, running normalization constant, and running output vector in FP32 across KV-block iterations. Once all KV blocks have been processed, the output accumulator is normalized and written back to global memory.
 
 Figure~\ref{fig:hbm_sram_map} makes the memory-hierarchy mapping explicit: HBM stores the full $Q$, $K$, $V$, and $O$ tensors, while SRAM and other on-chip state hold only the current query tile, the current K/V tile, and the row-wise running state needed for exact online softmax. The full $N \times N$ score matrix is never materialized.
 
@@ -251,13 +255,13 @@ The FA2-inspired kernel keeps the same intra-block computation but changes how t
             \small
             \textbf{Shared-Memory View of the Simplified FA1 Kernel}\\[4pt]
             \fbox{\parbox{0.16\linewidth}{\centering Q block\\shared memory}} \hfill
-            \fbox{\parbox{0.16\linewidth}{\centering K$^\top$ block\\shared memory}} \hfill
-            \fbox{\parbox{0.16\linewidth}{\centering V block\\shared memory}} \hfill
+            \fbox{\parbox{0.16\linewidth}{\centering shared K/V\\working buffer}} \hfill
+            \fbox{\parbox{0.16\linewidth}{\centering V fragments\\register-resident}} \hfill
             \fbox{\parbox{0.18\linewidth}{\centering score subtiles\\WMMA}} \hfill
             \fbox{\parbox{0.18\linewidth}{\centering running $(m,\ell,o)$\\FP32 state}}
         }
     }
-    \caption{Conceptual on-chip organization for the simplified FA1 kernel. The key idea is that only the current query/KV blocks and row-wise running state must remain resident, rather than the full score matrix.}
+    \caption{Conceptual on-chip organization for the simplified FA1 kernel. The key idea is that only the current query/KV blocks and row-wise running state must remain resident, rather than the full score matrix; the value tile is lifted into registers before the shared K/V buffer is reused for keys.}
     \label{fig:smem_view}
 \end{figure}
 
@@ -276,14 +280,14 @@ The FA2-inspired kernel keeps the same intra-block computation but changes how t
             $\Downarrow$ \hspace{3pt} \textit{one thread block loads only the current working set} \hspace{3pt} $\Downarrow$\\[5pt]
             \textbf{SRAM / on-chip working set for one block}\\[3pt]
             \fbox{\parbox{0.18\linewidth}{\centering $Q_i$ tile\\$64 \times d$}} \hfill
-            \fbox{\parbox{0.18\linewidth}{\centering $K_j^\top$ tile\\$64 \times d$}} \hfill
-            \fbox{\parbox{0.18\linewidth}{\centering $V_j$ tile\\$64 \times d$}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering shared KV tile\\$128 \times d$}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering cached $V_j$ fragments\\warp registers}} \hfill
             \fbox{\parbox{0.18\linewidth}{\centering running $(m,\ell,o)$\\per active row}}\\[5pt]
             \fbox{\parbox{0.82\linewidth}{\centering Ephemeral $16 \times 16$ WMMA score subtiles are computed, consumed immediately by the online softmax update, and then discarded.}}\\[4pt]
             \fbox{\parbox{0.82\linewidth}{\centering No full $N \times N$ score matrix is stored in either HBM or SRAM.}}
         }
     }
-    \caption{Explicit memory-hierarchy view of the simplified FA1 kernel. HBM holds the full input/output tensors, while SRAM holds only the current query tile, key/value tile, and row-wise online-softmax state for one thread block.}
+    \caption{Explicit memory-hierarchy view of the simplified FA1 kernel. HBM holds the full input/output tensors, while SRAM holds only the current query tile, the current shared KV tile, and the row-wise online-softmax state for one thread block; V fragments are then cached in registers before the shared buffer is reused for K.}
     \label{fig:hbm_sram_map}
 \end{figure}
 
@@ -299,6 +303,8 @@ The FA2-inspired kernel keeps the same intra-block computation but changes how t
         PyTorch baseline & yes & yes & yes & yes & no & no \\
         Simplified FA1 & yes & yes & yes & yes & yes & no \\
         FA2-inspired & yes & yes & yes & yes & yes & yes \\
+        No tensor cores & yes & yes & yes & yes & no & no \\
+        No vectorized loads & yes & yes & yes & yes & yes & no \\
         No online softmax & yes & yes & yes & yes & yes & no \\
         No SRAM tiling & yes & yes & yes & yes & no & no \\
         \bottomrule

@@ -55,3 +55,17 @@ void flash_attention_v1_no_tiling(
     project_out_t* d_O,
     int B, int H, int N, int d, float scale, bool causal
 );
+
+// V1 with shared-memory tiling and online softmax preserved, but no WMMA path
+void flash_attention_v1_no_tensor_cores(
+    const project_in_t* d_Q, const project_in_t* d_K, const project_in_t* d_V,
+    project_out_t* d_O,
+    int B, int H, int N, int d, float scale, bool causal
+);
+
+// V1 with the same core algorithm but scalar Q/K/V tile loads
+void flash_attention_v1_no_vectorized_loads(
+    const project_in_t* d_Q, const project_in_t* d_K, const project_in_t* d_V,
+    project_out_t* d_O,
+    int B, int H, int N, int d, float scale, bool causal
+);
