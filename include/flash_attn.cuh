@@ -28,8 +28,9 @@ void flash_attention_v1(
 // FA2-inspired extension:
 //   - retains the simplified forward-only scope above
 //   - keeps the dense exact attention computation
-//   - adds FA2-style sequence parallelism by optionally splitting the K/V
-//     dimension across multiple CTAs and combining the partial results
+//   - adds FA2-style sequence parallelism by splitting the K/V dimension
+//     across multiple CTAs when more than one K/V tile exists, then combining
+//     the partial results
 //
 // Note: this is not a full implementation of official FlashAttention-2.
 // ============================================================================

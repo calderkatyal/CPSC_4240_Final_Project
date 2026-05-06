@@ -125,7 +125,7 @@ inline void print_project_precision_summary(int d) {
     printf("Tensor-core score path: enabled for supported head dims {32, 64, 128}; current d=%d\n", d);
     printf("Simplified FA1 thread-block tiles: Q-block=%d rows, KV-block=%d rows\n",
            PROJECT_BLOCK_M, PROJECT_BLOCK_N);
-    printf("FA2-inspired extension: split-KV sequence parallelism when FA1 launch parallelism is low\n");
+    printf("FA2-inspired extension: split-KV sequence parallelism whenever more than one KV tile exists\n");
 }
 
 inline void convert_project_output_to_float(

@@ -3,8 +3,9 @@
 // Official FlashAttention-2's forward path improves parallelism by splitting
 // work along the sequence / K-V dimension when a single attention head does not
 // expose enough CTAs to fill the GPU. The simplified project analogue here is a
-// split-KV path with a small combine kernel, while falling back to the FA1 core
-// when the baseline launch already provides enough parallel work.
+// split-KV path with a small combine kernel. In this project we keep that
+// sequence-parallel idea explicit by always routing the FA2-inspired entrypoint
+// through the split-KV path.
 
 #include "project_flash_splitkv.cuh"
 

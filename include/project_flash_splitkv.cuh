@@ -453,12 +453,22 @@ inline int choose_splitkv_splits(int B, int H, int N, size_t partial_smem) {
     const int ctas_per_sm = splitkv_cached_ctas_per_sm<HEAD_DIM>(partial_smem);
     const int sm_count = splitkv_device_sm_count();
     int active_cta_slots = sm_count * ctas_per_sm;
-    if (base_ctas >= active_cta_slots) {
-        return 1;
-    }
-
     int max_splits = num_kv_tiles < 4 ? num_kv_tiles : 4;
-    return project_num_splits_heuristic(base_ctas, active_cta_slots, num_kv_tiles, max_splits);
+    int heuristic_splits = project_num_splits_heuristic(
+        base_ctas, active_cta_slots, num_kv_tiles, max_splits
+    );
+
+    // The FA2-inspired path in this project is meant to always introduce the
+    // new sequence-parallel idea whenever more than one K/V tile exists.
+    // So unlike the adaptive "use split-KV only if needed" policy, we force
+    // at least two splits when splitting is possible.
+    if (heuristic_splits < 2) {
+        heuristic_splits = 2;
+    }
+    if (heuristic_splits > max_splits) {
+        heuristic_splits = max_splits;
+    }
+    return heuristic_splits;
 }
 
 template<int HEAD_DIM>
@@ -483,14 +493,6 @@ inline void launch_flash_attention_splitkv_hdim(
     partial_smem += PROJECT_BLOCK_M * d_padded * sizeof(project_in_t);
     partial_smem += kv_buf_elems * sizeof(project_in_t);
     int num_splits = choose_splitkv_splits<HEAD_DIM>(B, H, N, partial_smem);
-    if (num_splits <= 1) {
-        release_splitkv_workspace();
-        launch_flash_attention_core_hdim<HEAD_DIM, PROJECT_Q_WARPS, PROJECT_BLOCK_N, true>(
-            d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-        );
-        return;
-    }
-
     prepare_splitkv_workspace(BH, N, HEAD_DIM, num_splits);
     auto& workspace = splitkv_workspace();
     float* partial_m_ptr = workspace.partial_m;
@@ -566,8 +568,7 @@ inline void prepare_flash_attention_splitkv_workspace(int B, int H, int N, int d
             size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
                                 + kv_buf_elems * sizeof(project_in_t);
             int num_splits = choose_splitkv_splits<32>(B, H, N, partial_smem);
-            if (num_splits > 1) prepare_splitkv_workspace(B * H, N, 32, num_splits);
-            else release_splitkv_workspace();
+            prepare_splitkv_workspace(B * H, N, 32, num_splits);
             break;
         }
         case 64: {
@@ -577,8 +578,7 @@ inline void prepare_flash_attention_splitkv_workspace(int B, int H, int N, int d
             size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
                                 + kv_buf_elems * sizeof(project_in_t);
             int num_splits = choose_splitkv_splits<64>(B, H, N, partial_smem);
-            if (num_splits > 1) prepare_splitkv_workspace(B * H, N, 64, num_splits);
-            else release_splitkv_workspace();
+            prepare_splitkv_workspace(B * H, N, 64, num_splits);
             break;
         }
         case 128: {
@@ -588,8 +588,7 @@ inline void prepare_flash_attention_splitkv_workspace(int B, int H, int N, int d
             size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
                                 + kv_buf_elems * sizeof(project_in_t);
             int num_splits = choose_splitkv_splits<128>(B, H, N, partial_smem);
-            if (num_splits > 1) prepare_splitkv_workspace(B * H, N, 128, num_splits);
-            else release_splitkv_workspace();
+            prepare_splitkv_workspace(B * H, N, 128, num_splits);
             break;
         }
         default:
