@@ -1,6 +1,6 @@
 // Ablation variants for the FA1 kernel.
 //
-// These isolate key ideas from the main FA1-style kernel:
+// These isolate key ideas from the main FA1 kernel:
 //   1. No online softmax: keep the same tiled WMMA score/value path, but use
 //      a two-pass softmax instead of the online recurrence.
 //   2. No tensor cores: keep the same tiled, fused, online-softmax structure,

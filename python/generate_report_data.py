@@ -12,17 +12,17 @@ SPEEDUP_BASELINE = "PyTorch attention baseline (fp16)"
 
 RUNTIME_METHODS = [
     (SPEEDUP_BASELINE, "PyTorch baseline"),
-    ("Simplified FA1", "Simplified FA1"),
+    ("Our FA", "Our FA"),
     ("Official FlashAttention-1 (fp16)", "Official FlashAttention-1"),
 ]
 
 SPEEDUP_METHODS = [
-    ("Simplified FA1", "Simplified FA1"),
+    ("Our FA", "Our FA"),
     ("Official FlashAttention-1 (fp16)", "Official FlashAttention-1"),
 ]
 
 ABLATION_METHODS = [
-    ("Simplified FA1", "Simplified FA1"),
+    ("Our FA", "Our FA"),
     ("Ablation: no tensor cores", "Ablation: no tensor cores"),
     ("Ablation: no vectorized loads", "Ablation: no vectorized loads"),
     ("Ablation: no online softmax", "Ablation: no online softmax"),

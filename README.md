@@ -110,7 +110,7 @@ The shared PyTorch attention baseline is adapted directly from the official
 `benchmarks/benchmark_flash_attention.py` comparison in the FlashAttention
 repository. It materializes the full score matrix with PyTorch eager ops
 (`baddbmm`, softmax, and value contraction), so the merged speedup tables and
-figures use one common baseline for the local kernel and the official
+figures use one common baseline for Our FA and the official
 FA1 kernel.
 
 ### 9. Build and run the project benchmark

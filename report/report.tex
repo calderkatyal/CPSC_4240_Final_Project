@@ -63,7 +63,7 @@ The goal here is narrower than reproducing the full \texttt{flash\_attn} package
     \item How much of FlashAttention-1's forward-pass advantage can be recovered with a concise implementation that keeps only the main ideas?
     \item Which of those ideas matter most in practice on the benchmarked workload?
 \end{enumerate}
-To answer these questions, the benchmark suite compares a local FA1-style kernel, four pure ablations, a shared eager PyTorch baseline, and the official FlashAttention-1 forward kernel on the same machine.
+To answer these questions, the benchmark suite compares Our FA, four pure ablations, a shared eager PyTorch baseline, and the official FlashAttention-1 forward kernel on the same machine.
 
 \section{Background}
 \subsection{Attention is limited by memory traffic}
@@ -141,10 +141,10 @@ These are the parts of FlashAttention that are both conceptually central and bro
 
 \section{Methods}
 \subsection{The eager baseline materializes the score matrix}
-The shared baseline matches the eager PyTorch attention path used in the official FlashAttention benchmark script. It forms the full score matrix with a batched matrix multiply, applies the causal mask and row-wise softmax, and then multiplies the resulting attention probabilities by $V$. The baseline uses FP16 inputs so that the datatype regime matches the local kernel and the official FA1 baseline, but it still materializes the full score matrix. This makes it a useful denominator for both runtime and memory comparisons.
+The shared baseline matches the eager PyTorch attention path used in the official FlashAttention benchmark script. It forms the full score matrix with a batched matrix multiply, applies the causal mask and row-wise softmax, and then multiplies the resulting attention probabilities by $V$. The baseline uses FP16 inputs so that the datatype regime matches Our FA and the official FA1 baseline, but it still materializes the full score matrix. This makes it a useful denominator for both runtime and memory comparisons.
 
-\subsection{The local kernel follows the FA1 forward pass}
-The local kernel mirrors the structure of the forward algorithm in the FA1 paper and the \texttt{v1.0.9} source tree \citep{dao2022flashattention,dao2022flashattentionrepo}. Each thread block owns a fixed query block and walks across the sequence in K/V tiles. In the benchmarked configuration, a block processes $64$ query rows at a time and advances over $128$-row K/V tiles. Queries and the current K/V tile are staged on chip, score subtiles are formed with WMMA tensor-core fragments, and the running softmax state is updated after each K/V tile. Let $m_i$ and $\ell_i$ denote the running row maximum and running normalization term for query row $i$. For a new K/V tile producing scores $s_{ij}$, the online recurrence is
+\subsection{Our FA follows the FA1 forward pass}
+Our FA mirrors the structure of the forward algorithm in the FA1 paper and the \texttt{v1.0.9} source tree \citep{dao2022flashattention,dao2022flashattentionrepo}. Each thread block owns a fixed query block and walks across the sequence in K/V tiles. In the benchmarked configuration, a block processes $64$ query rows at a time and advances over $128$-row K/V tiles. Queries and the current K/V tile are staged on chip, score subtiles are formed with WMMA tensor-core fragments, and the running softmax state is updated after each K/V tile. Let $m_i$ and $\ell_i$ denote the running row maximum and running normalization term for query row $i$. For a new K/V tile producing scores $s_{ij}$, the online recurrence is
 \begin{align}
 m_i' &= \max\left(m_i, \max_j s_{ij}\right), \\
 \ell_i' &= e^{m_i - m_i'} \ell_i + \sum_j e^{s_{ij} - m_i'}, \\
@@ -152,7 +152,7 @@ o_i' &= e^{m_i - m_i'} o_i + \sum_j e^{s_{ij} - m_i'} V_j .
 \end{align}
 After the final KV block, each output row is normalized by $\ell_i'$. This is the main algorithmic reason FlashAttention can remain exact while avoiding the full $N \times N$ attention matrix \citep{dao2022flashattention}.
 
-The implementation is intentionally smaller than the official package, but it preserves the core forward-pass structure:
+The implementation is intentionally smaller than the official package, but Our FA preserves the core forward-pass structure:
 \begin{itemize}
     \item a query block and the current key/value block are staged in shared memory;
     \item the score computation is built from WMMA tensor-core subtiles inside the staged K tile;
@@ -160,7 +160,7 @@ The implementation is intentionally smaller than the official package, but it pr
     \item only per-row running state and the final output are kept live between KV blocks, without materializing the full score matrix.
 \end{itemize}
 
-The same source comparison also clarifies what is left out. The local kernel does not include dropout, backward kernels, variable-length batching, MQA/GQA, KV cache support, BF16 variants, or the large family of architecture-specific kernels used in the package. It also avoids some of the more elaborate scheduling machinery from the source tree, such as deeper software pipelining and more specialized shared-memory layouts. Those omissions keep the code compact without changing the exact forward attention rule.
+The same source comparison also clarifies what is left out. Our FA does not include dropout, backward kernels, variable-length batching, MQA/GQA, KV cache support, BF16 variants, or the large family of architecture-specific kernels used in the package. It also avoids some of the more elaborate scheduling machinery from the source tree, such as deeper software pipelining and more specialized shared-memory layouts. Those omissions keep the code compact without changing the exact forward attention rule.
 
 \begin{figure}[H]
     \centering
@@ -199,7 +199,7 @@ We include four ablation kernels so the results can isolate which FA1 ingredient
 All four ablations remain exact. The goal is not to build straw-man baselines, but to preserve the surrounding FA1 structure while removing one ingredient at a time.
 
 \section{Experimental Setup}
-We study dense causal self-attention in a controlled forward-only setting. All methods use the same tensor shapes and masking convention so that runtime differences reflect kernel organization rather than changes in the mathematical task. The local kernel and the official baseline both run in mixed precision with FP16 inputs. Output accumulation and the reference comparison are performed in FP32, which matches the numerically stable regime used in the FlashAttention literature \citep{dao2022flashattention}.
+We study dense causal self-attention in a controlled forward-only setting. All methods use the same tensor shapes and masking convention so that runtime differences reflect kernel organization rather than changes in the mathematical task. Our FA and the official baseline both run in mixed precision with FP16 inputs. Output accumulation and the reference comparison are performed in FP32, which matches the numerically stable regime used in the FlashAttention literature \citep{dao2022flashattention}.
 
 \begin{table}[H]
     \centering
@@ -224,8 +224,8 @@ The benchmark fixes batch size, head count, head dimension, and masking pattern,
 
 The evaluation reports three classes of comparisons.
 \begin{enumerate}
-    \item \textbf{PyTorch baseline vs.\ local FA1 kernel.} This isolates the main FlashAttention-1 design choices inside one compact CUDA kernel.
-    \item \textbf{Local kernel vs.\ official FlashAttention-1.} This measures the gap between the compact implementation and the production FA1 kernel.
+    \item \textbf{PyTorch baseline vs.\ Our FA.} This isolates the main FlashAttention-1 design choices inside one compact CUDA kernel.
+    \item \textbf{Our FA vs.\ official FlashAttention-1.} This measures the gap between the compact implementation and the production FA1 kernel.
     \item \textbf{FA1 ablations.} These isolate which of the core FA1 ingredients are most important in practice.
 \end{enumerate}
 
@@ -302,15 +302,15 @@ The official baseline anchors the comparison to the original IO-aware reformulat
 
 Taken together, Figure~\ref{fig:gpuplots} and Tables~\ref{tab:runtime}--\ref{tab:ablation} show that the compact kernel captures much of the FA1 speed story while remaining short of the full production implementation.
 
-\subsection{The local FA1 kernel is much faster than eager attention}
-The main comparison is the eager PyTorch baseline versus the local FA1 kernel. At sequence length $512$, the local kernel is already $4.08\times$ faster than eager PyTorch; that speedup grows to $5.67\times$ at $1024$, $12.15\times$ at $2048$, and $17.64\times$ at $4096$. This trend matches the FA1 argument in the paper: as sequence length grows, the eager baseline pays more and more for materializing and rereading the full score matrix, while the tiled FA1 working set stays bounded by the query tile, the current K/V tile, and the row-wise running state.
+\subsection{Our FA is much faster than eager attention}
+The main comparison is the eager PyTorch baseline versus Our FA. At sequence length $512$, Our FA is already $4.08\times$ faster than eager PyTorch; that speedup grows to $5.67\times$ at $1024$, $12.15\times$ at $2048$, and $17.64\times$ at $4096$. This trend matches the FA1 argument in the paper: as sequence length grows, the eager baseline pays more and more for materializing and rereading the full score matrix, while the tiled FA1 working set stays bounded by the query tile, the current K/V tile, and the row-wise running state.
 
-The memory results tell the same story. At $N=4096$, the eager PyTorch baseline peaks at about $1.28$~GB, while the local FA1 kernel uses about $33.6$~MB. That is a reduction of roughly $38\times$. The gap is smaller at short sequence length, but it widens quickly as $N$ grows because the eager score matrix scales quadratically.
+The memory results tell the same story. At $N=4096$, the eager PyTorch baseline peaks at about $1.28$~GB, while Our FA uses about $33.6$~MB. That is a reduction of roughly $38\times$. The gap is smaller at short sequence length, but it widens quickly as $N$ grows because the eager score matrix scales quadratically.
 
 \subsection{The compact kernel remains behind the official baseline at long sequence length}
-The local kernel is competitive with the official baseline at shorter sequence lengths and is even slightly faster than official FA1 at $N=512$ in this benchmark. That should not be read as a claim that the local kernel is generally better. The benchmark fixes one shape and one narrow feature set, whereas the package kernel is designed to cover a broader range of head dimensions, masks, and deployment settings.
+Our FA is competitive with the official baseline at shorter sequence lengths and is even slightly faster than official FA1 at $N=512$ in this benchmark. That should not be read as a claim that Our FA is generally better. The benchmark fixes one shape and one narrow feature set, whereas the package kernel is designed to cover a broader range of head dimensions, masks, and deployment settings.
 
-At longer sequence length, the production kernel pulls ahead in the expected way. At $N=2048$, the local kernel runs in $0.1372$~ms, compared with $0.0959$~ms for official FA1. At $N=4096$, the gap widens to $0.4398$~ms versus $0.2987$~ms for official FA1. In speedup terms, the local kernel reaches $17.64\times$ versus PyTorch at $N=4096$, while official FA1 reaches $25.97\times$. The most plausible interpretation is that the compact kernel has captured the major algorithmic advantages of FA1, but it still omits some of the heavier engineering that matters once the sequence becomes long enough for the package kernel to amortize its extra machinery.
+At longer sequence length, the production kernel pulls ahead in the expected way. At $N=2048$, Our FA runs in $0.1372$~ms, compared with $0.0959$~ms for official FA1. At $N=4096$, the gap widens to $0.4398$~ms versus $0.2987$~ms for official FA1. In speedup terms, Our FA reaches $17.64\times$ versus PyTorch at $N=4096$, while official FA1 reaches $25.97\times$. The most plausible interpretation is that the compact kernel has captured the major algorithmic advantages of FA1, but it still omits some of the heavier engineering that matters once the sequence becomes long enough for the package kernel to amortize its extra machinery.
 
 \subsection{The ablations identify the main sources of speed}
 The ablations confirm that no single idea explains the full gain. At $N=2048$, removing tensor cores increases runtime from $0.1372$~ms to $1.2235$~ms, making this the largest single drop. This is consistent with the fact that the score calculation is still the dominant arithmetic kernel even after the IO reorganization.
@@ -318,7 +318,7 @@ The ablations confirm that no single idea explains the full gain. At $N=2048$, r
 The other ablations are also informative. Disabling vectorized Q/K/V loads raises runtime to $0.4120$~ms, showing that the memory path matters well beyond the high-level tiling scheme. Replacing online softmax with the two-pass exact variant increases runtime to $0.4263$~ms, which shows that the online recurrence is not just a theoretical device for exactness; it also has a large practical effect on the amount of work performed per row. Finally, removing K/V shared-memory tiling raises runtime to $0.2360$~ms. This is still faster than eager PyTorch because the kernel retains exact fused tile-wise computation and never materializes the full score matrix, but the loss is still substantial relative to the full FA1 kernel.
 
 \section{Discussion}
-The results support a simple conclusion: the paper's main forward-pass ideas are enough to recover a large fraction of FlashAttention-1's practical benefit. The local kernel preserves the algorithmic heart of FA1---tile-by-tile exact attention, online softmax, and immediate value accumulation---and that already closes most of the gap to the eager baseline.
+The results support a simple conclusion: the paper's main forward-pass ideas are enough to recover a large fraction of FlashAttention-1's practical benefit. Our FA preserves the algorithmic heart of FA1---tile-by-tile exact attention, online softmax, and immediate value accumulation---and that already closes most of the gap to the eager baseline.
 
 At the same time, the comparison with official FA1 shows where brevity stops helping. The package kernel gains additional speed from a broader and more heavily tuned implementation strategy than the one pursued here. That gap is most visible at long sequence lengths, where the package kernel more effectively translates the same high-level algorithm into a mature production forward path.
 
@@ -333,7 +333,7 @@ This implementation still has several deliberate limitations.
 These limitations are acceptable for the stated goal of this report. The emphasis is on understanding the FA1 forward algorithm and measuring the impact of its main ingredients, not on reproducing the entire production stack.
 
 \section{Conclusion}
-This report studies how much of FlashAttention-1 can be preserved in a compact forward CUDA kernel without losing the main performance story. The answer is that a concise implementation can go a long way: the local kernel delivers large speedups over eager attention, substantially reduces memory use, and remains within a moderate factor of the official FA1 package kernel at long sequence length. The ablations further show that tensor cores, vectorized movement, online softmax, and shared-memory tiling all contribute materially to that result. Together, these findings support the claim that the central FA1 ideas are both understandable and effective even in a much smaller codebase.
+This report studies how much of FlashAttention-1 can be preserved in a compact forward CUDA kernel without losing the main performance story. The answer is that a concise implementation can go a long way: Our FA delivers large speedups over eager attention, substantially reduces memory use, and remains within a moderate factor of the official FA1 package kernel at long sequence length. The ablations further show that tensor cores, vectorized movement, online softmax, and shared-memory tiling all contribute materially to that result. Together, these findings support the claim that the central FA1 ideas are both understandable and effective even in a much smaller codebase.
 
 \clearpage
 

@@ -1,5 +1,5 @@
 """
-GPU benchmark runner for the local FA1 kernel.
+GPU benchmark runner for the FA1 kernel.
 
 This script runs the local CUDA benchmark binary and then merges any separately
 generated official FlashAttention CSVs into one comparison file.

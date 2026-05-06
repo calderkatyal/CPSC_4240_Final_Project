@@ -1,8 +1,8 @@
 """
-Generate GPU benchmark plots for the local FA1 kernel suite.
+Generate GPU benchmark plots for the FA1 kernel suite.
 
 The script plots:
-  - local kernel results from `results/benchmark_results.csv`
+  - Our FA results from `results/benchmark_results.csv`
   - merged comparison data from `results/gpu_comparison_results.csv` when available
 """
 
@@ -23,7 +23,7 @@ SPEEDUP_BASELINE = "PyTorch attention baseline (fp16)"
 
 COLORS = {
     SPEEDUP_BASELINE: "#ff7f0e",
-    "Simplified FA1": "#1f77b4",
+    "Our FA": "#1f77b4",
     "Official FlashAttention-1 (fp16)": "#9467bd",
     "Ablation: no tensor cores": "#d62728",
     "Ablation: no vectorized loads": "#bcbd22",
@@ -33,7 +33,7 @@ COLORS = {
 
 MARKERS = {
     SPEEDUP_BASELINE: "D",
-    "Simplified FA1": "o",
+    "Our FA": "o",
     "Official FlashAttention-1 (fp16)": "P",
     "Ablation: no tensor cores": "s",
     "Ablation: no vectorized loads": "v",
@@ -60,7 +60,6 @@ def group_by_method(rows: list[dict]) -> dict[str, dict[str, list[float]]]:
         groups[method]["memory"].append(int(row["memory_bytes"]))
         groups[method]["errors"].append(float(row["max_error"]))
     return groups
-
 
 def plot_runtime_scaling(groups, title: str, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -91,7 +90,7 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     priority = [
         SPEEDUP_BASELINE,
-        "Simplified FA1",
+        "Our FA",
         "Official FlashAttention-1 (fp16)",
     ]
     for method in priority:
@@ -163,7 +162,7 @@ def plot_speedup_vs_baseline(groups, title: str, output_path: Path) -> None:
 
 def plot_ablation_bars(groups, title: str, output_path: Path) -> None:
     candidates = [
-        "Simplified FA1",
+        "Our FA",
         "Ablation: no tensor cores",
         "Ablation: no vectorized loads",
         "Ablation: no online softmax",
@@ -220,7 +219,7 @@ def generate_from_csv(path: Path, label: str, prefix: str) -> None:
 def main() -> None:
     generated_any = False
     specs = [
-        ("benchmark_results.csv", "Local FA1 kernels", "project_gpu"),
+        ("benchmark_results.csv", "Our FA kernels", "project_gpu"),
         ("gpu_comparison_results.csv", "GPU comparison", "gpu_comparison"),
     ]
     for csv_name, label, prefix in specs:

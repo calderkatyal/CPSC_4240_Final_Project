@@ -12,7 +12,7 @@
 //   - no Hopper-specific TMA / warp-specialized / FP8 kernels
 
 // ============================================================================
-// FA1-style kernel:
+// FA1 kernel:
 //   - shared-memory tiling for K/V (and Q staging)
 //   - online softmax
 //   - fused forward pass
