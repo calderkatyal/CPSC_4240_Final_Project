@@ -660,12 +660,12 @@ void flash_attention_v1_no_online_softmax(
     CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&d_row_max), (size_t)BH * N * sizeof(float)));
 
     size_t pass1_smem = (PROJECT_BLOCK_M * d) * sizeof(project_in_t);
-    pass1_smem += (block_n * d) * sizeof(project_in_t);
-    pass1_smem += (PROJECT_Q_WARPS * PROJECT_TILE * block_n) * sizeof(float);
+    pass1_smem += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
+    pass1_smem += (PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_BLOCK_N) * sizeof(float);
     size_t pass2_smem = (PROJECT_BLOCK_M * d) * sizeof(project_in_t);
-    pass2_smem += (block_n * d) * sizeof(project_in_t);
-    pass2_smem += (block_n * d) * sizeof(project_in_t);
-    pass2_smem += (PROJECT_Q_WARPS * PROJECT_TILE * block_n) * sizeof(float);
+    pass2_smem += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
+    pass2_smem += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
+    pass2_smem += (PROJECT_Q_WARPS * PROJECT_TILE * PROJECT_BLOCK_N) * sizeof(float);
 
     dim3 block(PROJECT_THREADS);
     dim3 grid(num_q_tiles, 1, BH);
