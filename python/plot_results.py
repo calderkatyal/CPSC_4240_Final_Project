@@ -20,11 +20,21 @@ import matplotlib.pyplot as plt
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 SPEEDUP_BASELINE = "PyTorch attention baseline (fp16)"
+DISPLAY_BY_SOURCE = {
+    SPEEDUP_BASELINE: "PyTorch baseline",
+    "Our FA": "Our FA",
+    "Official FlashAttention-1 (fp16)": "Official FlashAttention-1",
+    "Ablation: no tensor cores": "Ablation: no tensor cores",
+    "Ablation: no vectorized loads": "Ablation: no vectorized loads",
+    "Ablation: no online softmax": "Ablation: no online softmax",
+    "Ablation: no SRAM tiling": "Ablation: no SRAM tiling",
+}
+DISPLAY_BASELINE = "PyTorch baseline"
 
 COLORS = {
-    SPEEDUP_BASELINE: "#ff7f0e",
+    DISPLAY_BASELINE: "#ff7f0e",
     "Our FA": "#1f77b4",
-    "Official FlashAttention-1 (fp16)": "#9467bd",
+    "Official FlashAttention-1": "#9467bd",
     "Ablation: no tensor cores": "#d62728",
     "Ablation: no vectorized loads": "#bcbd22",
     "Ablation: no online softmax": "#7f7f7f",
@@ -32,9 +42,9 @@ COLORS = {
 }
 
 MARKERS = {
-    SPEEDUP_BASELINE: "D",
+    DISPLAY_BASELINE: "D",
     "Our FA": "o",
-    "Official FlashAttention-1 (fp16)": "P",
+    "Official FlashAttention-1": "P",
     "Ablation: no tensor cores": "s",
     "Ablation: no vectorized loads": "v",
     "Ablation: no online softmax": "x",
@@ -52,7 +62,7 @@ def load_csv(path: Path) -> list[dict]:
 def group_by_method(rows: list[dict]) -> dict[str, dict[str, list[float]]]:
     groups = defaultdict(lambda: {"seq_lens": [], "times": [], "memory": [], "errors": []})
     for row in rows:
-        method = row["method"]
+        method = DISPLAY_BY_SOURCE.get(row["method"])
         if method not in ALLOWED_METHODS:
             continue
         groups[method]["seq_lens"].append(int(row["seq_len"]))
@@ -89,9 +99,9 @@ def plot_runtime_scaling(groups, title: str, output_path: Path) -> None:
 def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     priority = [
-        SPEEDUP_BASELINE,
+        DISPLAY_BASELINE,
         "Our FA",
-        "Official FlashAttention-1 (fp16)",
+        "Official FlashAttention-1",
     ]
     for method in priority:
         if method not in groups:
@@ -121,14 +131,14 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
 
 
 def plot_speedup_vs_baseline(groups, title: str, output_path: Path) -> None:
-    if SPEEDUP_BASELINE not in groups:
+    if DISPLAY_BASELINE not in groups:
         return
 
-    baseline_map = dict(zip(groups[SPEEDUP_BASELINE]["seq_lens"], groups[SPEEDUP_BASELINE]["times"]))
+    baseline_map = dict(zip(groups[DISPLAY_BASELINE]["seq_lens"], groups[DISPLAY_BASELINE]["times"]))
     fig, ax = plt.subplots(figsize=(8, 5))
 
     for method, data in sorted(groups.items()):
-        if method == SPEEDUP_BASELINE:
+        if method == DISPLAY_BASELINE:
             continue
         seq_lens = []
         speedups = []
@@ -147,7 +157,7 @@ def plot_speedup_vs_baseline(groups, title: str, output_path: Path) -> None:
                 markersize=6,
             )
 
-    ax.axhline(1.0, color="gray", linestyle="--", alpha=0.6, label="PyTorch baseline")
+    ax.axhline(1.0, color="gray", linestyle="--", alpha=0.6, label=DISPLAY_BASELINE)
     ax.set_xlabel("Sequence Length (N)")
     ax.set_ylabel("Speedup vs PyTorch baseline")
     ax.set_title(title)
