@@ -2,6 +2,7 @@
 
 \usepackage{nips15submit_e,times}
 \usepackage{hyperref}
+\usepackage{xurl}
 \usepackage{url}
 \usepackage{amsmath}
 \usepackage{amssymb}
@@ -48,7 +49,7 @@ CPSC 4240: Parallel Programming \\
 \maketitle
 
 \begin{abstract}
-FlashAttention accelerates the most important operation in modern machine learning--attention--by reducing traffic between high-bandwidth memory (HBM) and on-chip SRAM. This final project provides a small, compact, CUDA-C++ version of the FlashAttention-1 forward pass, which retains the major algorithmic concepts identified in the FlashAttention-1 paper and source code: exact online softmax, tiled on-chip working sets, fused value accumulation, mixed precision, and tensor core-based scoring. The CUDA-C++ version has been constructed with the objective of removing most of the extra features and other low-level pipelining mechanisms that are found in the production package and that make it harder to read. On the benchmarks that were run during this work, the resulting kernel is approximately $17.49\times$ faster than the PyTorch baseline when running sequences of length $4096$ ($25.35\times$ for official FlashAttention-1 at the same sequence length). When ablating individual components within this implementation to identify their contributions to the improved performance, our results showed that tensor cores contribute the most to performance, with vectorized tile movement, online softmax, and shared-memory tiling all contributing moderately. Additionally, because the full score matrix is never materialized, memory usage is also dramatically lower than in the PyTorch baseline.
+FlashAttention accelerates the most important operation in modern machine learning--attention--by reducing traffic between high-bandwidth memory (HBM) and on-chip SRAM. This final project provides a small, compact, CUDA-C++ version of the FlashAttention-1 forward pass, which retains the major algorithmic concepts identified in the FlashAttention-1 paper and source code: exact online softmax, tiled on-chip working sets, fused value accumulation, mixed precision, and tensor core-based scoring. The CUDA-C++ version has been constructed with the objective of removing most of the extra features and other low-level pipelining mechanisms that are found in the production package and that make it harder to read. On the benchmarks that were run during this work, the resulting kernel is approximately $17.49\times$ faster than the PyTorch baseline when running sequences of length $4096$ ($25.35\times$ for official FlashAttention-1 at the same sequence length). When ablating individual components within this implementation to identify their contributions to the improved performance, our results showed that tensor cores contribute the most to performance, with vectorized tile movement, online softmax, and shared-memory tiling all contributing moderately. Additionally, because the full score matrix is never materialized, memory usage is also dramatically lower than in the PyTorch baseline.\footnote{View our codebase at \url{https://github.com/calderkatyal/CPSC_4240_Final_Project}.}
 \end{abstract}
 
 \section{Introduction}
