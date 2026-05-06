@@ -112,9 +112,9 @@ __device__ inline void compute_score_block_tensor_core(
 //      kernels for common head dimensions.
 //   2. 16-byte vectorized Q/K/V tile loads (the official code uses uint4
 //      global-memory transactions in its tile loaders).
-//   3. Shared K/V SRAM backed by V fragments kept in registers, following the
-//      native FA1 pattern more closely without leaving the WMMA programming
-//      model.
+//   3. Shared-memory staging for both K and V. Native FA1 can profitably keep
+//      more V state in registers, but in this concise WMMA kernel that
+//      straight-line translation over-inflates register pressure.
 //   4. Loop ordering that reuses loaded Q fragments across K tiles and reuses
 //      loaded P fragments across output-dimension tiles.
 //   5. exp2-based online softmax scaling, matching the official softmax path.
@@ -166,6 +166,65 @@ __device__ inline void load_padded_rowmajor_tile(
     }
 }
 
+template<int ROWS, int COLS, int COLS_PADDED, bool UseVecLoads>
+__device__ inline void load_padded_kv_tiles(
+    project_in_t* dst_k,
+    project_in_t* dst_v,
+    const project_in_t* src_k,
+    const project_in_t* src_v,
+    int global_row_start,
+    int N
+) {
+    const project_in_t zero = __float2half(0.0f);
+    if constexpr (UseVecLoads) {
+        static_assert((COLS % 8) == 0);
+        static_assert((COLS_PADDED % 8) == 0);
+        constexpr int kVecElems = 8;
+        constexpr int kVecsPerRow = COLS / kVecElems;
+
+        for (int idx = threadIdx.x; idx < ROWS * kVecsPerRow; idx += blockDim.x) {
+            int row = idx / kVecsPerRow;
+            int vec = idx % kVecsPerRow;
+            int gr = global_row_start + row;
+            uint4 k_data = make_uint4(0u, 0u, 0u, 0u);
+            uint4 v_data = make_uint4(0u, 0u, 0u, 0u);
+            if (gr < N) {
+                const uint4* src_k_vec =
+                    reinterpret_cast<const uint4*>(src_k + gr * COLS);
+                const uint4* src_v_vec =
+                    reinterpret_cast<const uint4*>(src_v + gr * COLS);
+                k_data = src_k_vec[vec];
+                v_data = src_v_vec[vec];
+            }
+            uint4* dst_k_vec = reinterpret_cast<uint4*>(dst_k + row * COLS_PADDED);
+            uint4* dst_v_vec = reinterpret_cast<uint4*>(dst_v + row * COLS_PADDED);
+            dst_k_vec[vec] = k_data;
+            dst_v_vec[vec] = v_data;
+        }
+    } else {
+        for (int idx = threadIdx.x; idx < ROWS * COLS; idx += blockDim.x) {
+            int row = idx / COLS;
+            int col = idx % COLS;
+            int gr = global_row_start + row;
+            if (gr < N) {
+                dst_k[row * COLS_PADDED + col] = src_k[gr * COLS + col];
+                dst_v[row * COLS_PADDED + col] = src_v[gr * COLS + col];
+            } else {
+                dst_k[row * COLS_PADDED + col] = zero;
+                dst_v[row * COLS_PADDED + col] = zero;
+            }
+        }
+    }
+
+    for (int idx = threadIdx.x; idx < ROWS * (COLS_PADDED - COLS);
+         idx += blockDim.x) {
+        int row = idx / (COLS_PADDED - COLS);
+        int pad = idx % (COLS_PADDED - COLS);
+        dst_k[row * COLS_PADDED + COLS + pad] = zero;
+        dst_v[row * COLS_PADDED + COLS + pad] = zero;
+    }
+}
+
 template<int HEAD_DIM, int Q_WARPS, int BLOCK_N, bool UseVecLoads>
 static __global__ void flash_attention_core_kernel(
     const project_in_t* __restrict__ Q,
@@ -202,9 +261,13 @@ static __global__ void flash_attention_core_kernel(
     project_out_t* o_base = O + batch_head * N * d;
 
     extern __shared__ __align__(32) unsigned char smem_raw[];
+    constexpr int kv_buf_elems =
+        shared_kv_buffer_elems<block_m, BLOCK_N, d_padded, bn_padded>();
+
     project_in_t* s_q  = reinterpret_cast<project_in_t*>(smem_raw);
-    project_in_t* s_kv = s_q + block_m * d_padded;
-    project_in_t* s_p  = s_kv;
+    project_in_t* s_kt = s_q + block_m * d_padded;
+    project_in_t* s_v  = s_kt + kv_buf_elems;
+    project_in_t* s_p  = s_kt;
 
     project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d_padded;
     project_in_t* s_p_warp = s_p + warp_id * PROJECT_TILE * bn_padded;
@@ -244,29 +307,8 @@ static __global__ void flash_attention_core_kernel(
     for (int kv_tile = 0; kv_tile < num_kv_tiles; kv_tile++) {
         const int kv_start = kv_tile * BLOCK_N;
 
-        load_padded_rowmajor_tile<BLOCK_N, d, d_padded, UseVecLoads>(
-            s_kv, v_base, kv_start, N
-        );
-        __syncthreads();
-
-        wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
-                       PROJECT_TILE, project_in_t,
-                       wmma::row_major> v_frag[k_tiles_per_block][num_o_frags];
-        #pragma unroll
-        for (int kk = 0; kk < BLOCK_N; kk += PROJECT_TILE) {
-            #pragma unroll
-            for (int dd = 0; dd < d; dd += PROJECT_TILE) {
-                wmma::load_matrix_sync(
-                    v_frag[kk / PROJECT_TILE][dd / PROJECT_TILE],
-                    s_kv + kk * d_padded + dd,
-                    d_padded
-                );
-            }
-        }
-
-        __syncthreads();
-        load_padded_rowmajor_tile<BLOCK_N, d, d_padded, UseVecLoads>(
-            s_kv, k_base, kv_start, N
+        load_padded_kv_tiles<BLOCK_N, d, d_padded, UseVecLoads>(
+            s_kt, s_v, k_base, v_base, kv_start, N
         );
         __syncthreads();
 
@@ -285,7 +327,7 @@ static __global__ void flash_attention_core_kernel(
                                PROJECT_TILE, project_in_t,
                                wmma::col_major> b;
                 wmma::load_matrix_sync(
-                    b, s_kv + tn * PROJECT_TILE * d_padded + k0, d_padded
+                    b, s_kt + tn * PROJECT_TILE * d_padded + k0, d_padded
                 );
                 wmma::mma_sync(sf[tn], q_frag[k0 / PROJECT_TILE], b, sf[tn]);
             }
@@ -402,9 +444,13 @@ static __global__ void flash_attention_core_kernel(
 
             #pragma unroll
             for (int dd = 0; dd < d; dd += PROJECT_TILE) {
-                wmma::mma_sync(o_frag[dd / PROJECT_TILE], pf,
-                               v_frag[kk / PROJECT_TILE][dd / PROJECT_TILE],
-                               o_frag[dd / PROJECT_TILE]);
+                wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
+                               PROJECT_TILE, project_in_t,
+                               wmma::row_major> vf;
+                wmma::load_matrix_sync(vf, s_v + kk * d_padded + dd, d_padded);
+                wmma::mma_sync(
+                    o_frag[dd / PROJECT_TILE], pf, vf, o_frag[dd / PROJECT_TILE]
+                );
             }
         }
 
@@ -418,20 +464,20 @@ static __global__ void flash_attention_core_kernel(
         #pragma unroll
         for (int f = 0; f < num_o_frags; f++) {
             int bc = f * PROJECT_TILE;
-            o_base[global_row0 * d + bc + fp * 2] = o_frag[f].x[0] * inv_l0;
-            o_base[global_row0 * d + bc + fp * 2 + 1] = o_frag[f].x[1] * inv_l0;
-            o_base[global_row0 * d + bc + fp * 2 + 8] = o_frag[f].x[4] * inv_l0;
-            o_base[global_row0 * d + bc + fp * 2 + 9] = o_frag[f].x[5] * inv_l0;
+            o_base[global_row0 * d + bc + fp * 2] = __float2half_rn(o_frag[f].x[0] * inv_l0);
+            o_base[global_row0 * d + bc + fp * 2 + 1] = __float2half_rn(o_frag[f].x[1] * inv_l0);
+            o_base[global_row0 * d + bc + fp * 2 + 8] = __float2half_rn(o_frag[f].x[4] * inv_l0);
+            o_base[global_row0 * d + bc + fp * 2 + 9] = __float2half_rn(o_frag[f].x[5] * inv_l0);
         }
     }
     if (global_row1 < N) {
         #pragma unroll
         for (int f = 0; f < num_o_frags; f++) {
             int bc = f * PROJECT_TILE;
-            o_base[global_row1 * d + bc + fp * 2] = o_frag[f].x[2] * inv_l1;
-            o_base[global_row1 * d + bc + fp * 2 + 1] = o_frag[f].x[3] * inv_l1;
-            o_base[global_row1 * d + bc + fp * 2 + 8] = o_frag[f].x[6] * inv_l1;
-            o_base[global_row1 * d + bc + fp * 2 + 9] = o_frag[f].x[7] * inv_l1;
+            o_base[global_row1 * d + bc + fp * 2] = __float2half_rn(o_frag[f].x[2] * inv_l1);
+            o_base[global_row1 * d + bc + fp * 2 + 1] = __float2half_rn(o_frag[f].x[3] * inv_l1);
+            o_base[global_row1 * d + bc + fp * 2 + 8] = __float2half_rn(o_frag[f].x[6] * inv_l1);
+            o_base[global_row1 * d + bc + fp * 2 + 9] = __float2half_rn(o_frag[f].x[7] * inv_l1);
         }
     }
 }
@@ -460,6 +506,7 @@ inline void launch_flash_attention_core_hdim(
     size_t smem_bytes = 0;
     smem_bytes += block_m * d_padded * sizeof(project_in_t);
     smem_bytes += kv_buf_elems * sizeof(project_in_t);
+    smem_bytes += BLOCK_N * d_padded * sizeof(project_in_t);
 
     dim3 block(threads);
     dim3 grid(num_q_tiles, 1, BH);
@@ -490,15 +537,9 @@ inline void dispatch_flash_attention_core_blockn(
     float scale_l2,
     bool causal
 ) {
-    if (project_block_n_for_head_dim(HEAD_DIM, N) == PROJECT_BLOCK_N_LARGE) {
-        launch_flash_attention_core_hdim<HEAD_DIM, Q_WARPS, PROJECT_BLOCK_N_LARGE, UseVecLoads>(
-            d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-        );
-    } else {
-        launch_flash_attention_core_hdim<HEAD_DIM, Q_WARPS, PROJECT_BLOCK_N, UseVecLoads>(
-            d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-        );
-    }
+    launch_flash_attention_core_hdim<HEAD_DIM, Q_WARPS, PROJECT_BLOCK_N, UseVecLoads>(
+        d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+    );
 }
 
 template<bool UseVecLoads>

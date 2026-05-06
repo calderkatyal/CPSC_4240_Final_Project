@@ -104,8 +104,12 @@ void run_correctness_check(
     fn(d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal);
     CUDA_CHECK(cudaDeviceSynchronize());
 
+    std::vector<project_out_t> h_O_raw(total);
     std::vector<float> h_O(total);
-    CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, total * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(
+        h_O_raw.data(), d_O, total * sizeof(project_out_t), cudaMemcpyDeviceToHost
+    ));
+    convert_project_output_to_float(h_O_raw.data(), h_O.data(), (int)total);
 
     float err = max_abs_diff(h_ref, h_O.data(), (int)total);
     printf("  %-35s max_abs_error = %.6e  %s\n", name, err, err < 3e-3 ? "PASS" : "FAIL");
@@ -218,8 +222,12 @@ int main(int argc, char** argv) {
             method.fn(d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal);
             CUDA_CHECK(cudaDeviceSynchronize());
 
+            std::vector<project_out_t> h_O_raw(total);
             std::vector<float> h_O(total);
-            CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, output_bytes, cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(
+                h_O_raw.data(), d_O, output_bytes, cudaMemcpyDeviceToHost
+            ));
+            convert_project_output_to_float(h_O_raw.data(), h_O.data(), (int)total);
             float err = max_abs_diff(h_ref.data(), h_O.data(), (int)total);
 
             printf("  %-35s %8.3f ms  mem=%zu bytes  err=%.2e\n",

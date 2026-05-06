@@ -604,15 +604,9 @@ void dispatch_no_tensor_cores_blockn(
     float scale_l2,
     bool causal
 ) {
-    if (project_block_n_for_head_dim(HEAD_DIM, N) == PROJECT_BLOCK_N_LARGE) {
-        launch_no_tensor_cores_hdim<HEAD_DIM, PROJECT_BLOCK_N_LARGE>(
-            d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-        );
-    } else {
-        launch_no_tensor_cores_hdim<HEAD_DIM, PROJECT_BLOCK_N>(
-            d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-        );
-    }
+    launch_no_tensor_cores_hdim<HEAD_DIM, PROJECT_BLOCK_N>(
+        d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+    );
 }
 
 void launch_no_tensor_cores(
@@ -660,8 +654,6 @@ void flash_attention_v1_no_online_softmax(
 ) {
     check_supported_head_dim(d);
     const float scale_l2 = scale * PROJECT_LOG2E;
-    const int block_n = PROJECT_BLOCK_N;
-
     int BH = B * H;
     int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
     float* d_row_max = nullptr;
@@ -679,57 +671,29 @@ void flash_attention_v1_no_online_softmax(
     dim3 grid(num_q_tiles, 1, BH);
 
     if (pass1_smem >= 48 * 1024) {
-        if (block_n == PROJECT_BLOCK_N_LARGE) {
-            CUDA_CHECK(cudaFuncSetAttribute(
-                two_pass_find_max_kernel<PROJECT_BLOCK_N_LARGE>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                pass1_smem
-            ));
-        } else {
-            CUDA_CHECK(cudaFuncSetAttribute(
-                two_pass_find_max_kernel<PROJECT_BLOCK_N>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                pass1_smem
-            ));
-        }
+        CUDA_CHECK(cudaFuncSetAttribute(
+            two_pass_find_max_kernel<PROJECT_BLOCK_N>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            pass1_smem
+        ));
     }
 
-    if (block_n == PROJECT_BLOCK_N_LARGE) {
-        two_pass_find_max_kernel<PROJECT_BLOCK_N_LARGE><<<grid, block, pass1_smem>>>(
-            d_Q, d_K, d_row_max, N, d, scale_l2, causal
-        );
-    } else {
-        two_pass_find_max_kernel<PROJECT_BLOCK_N><<<grid, block, pass1_smem>>>(
-            d_Q, d_K, d_row_max, N, d, scale_l2, causal
-        );
-    }
+    two_pass_find_max_kernel<PROJECT_BLOCK_N><<<grid, block, pass1_smem>>>(
+        d_Q, d_K, d_row_max, N, d, scale_l2, causal
+    );
     CUDA_CHECK(cudaGetLastError());
 
     if (pass2_smem >= 48 * 1024) {
-        if (block_n == PROJECT_BLOCK_N_LARGE) {
-            CUDA_CHECK(cudaFuncSetAttribute(
-                two_pass_attn_kernel<PROJECT_BLOCK_N_LARGE>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                pass2_smem
-            ));
-        } else {
-            CUDA_CHECK(cudaFuncSetAttribute(
-                two_pass_attn_kernel<PROJECT_BLOCK_N>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                pass2_smem
-            ));
-        }
+        CUDA_CHECK(cudaFuncSetAttribute(
+            two_pass_attn_kernel<PROJECT_BLOCK_N>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            pass2_smem
+        ));
     }
 
-    if (block_n == PROJECT_BLOCK_N_LARGE) {
-        two_pass_attn_kernel<PROJECT_BLOCK_N_LARGE><<<grid, block, pass2_smem>>>(
-            d_Q, d_K, d_V, d_row_max, d_O, N, d, scale_l2, causal
-        );
-    } else {
-        two_pass_attn_kernel<PROJECT_BLOCK_N><<<grid, block, pass2_smem>>>(
-            d_Q, d_K, d_V, d_row_max, d_O, N, d, scale_l2, causal
-        );
-    }
+    two_pass_attn_kernel<PROJECT_BLOCK_N><<<grid, block, pass2_smem>>>(
+        d_Q, d_K, d_V, d_row_max, d_O, N, d, scale_l2, causal
+    );
     CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(tracked_cuda_free(d_row_max));
@@ -749,38 +713,22 @@ void flash_attention_v1_no_tiling(
 ) {
     check_supported_head_dim(d);
     const float scale_l2 = scale * PROJECT_LOG2E;
-    const int block_n = project_block_n_for_head_dim(d, N);
-
     int BH = B * H;
     size_t smem_bytes = (PROJECT_BLOCK_M * d) * sizeof(project_in_t);
     dim3 block(PROJECT_THREADS);
     dim3 grid(cdiv(N, PROJECT_BLOCK_M), 1, BH);
 
     if (smem_bytes >= 48 * 1024) {
-        if (block_n == PROJECT_BLOCK_N_LARGE) {
-            CUDA_CHECK(cudaFuncSetAttribute(
-                flash_attn_no_tiling_kernel<PROJECT_BLOCK_N_LARGE>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                smem_bytes
-            ));
-        } else {
-            CUDA_CHECK(cudaFuncSetAttribute(
-                flash_attn_no_tiling_kernel<PROJECT_BLOCK_N>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                smem_bytes
-            ));
-        }
+        CUDA_CHECK(cudaFuncSetAttribute(
+            flash_attn_no_tiling_kernel<PROJECT_BLOCK_N>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            smem_bytes
+        ));
     }
 
-    if (block_n == PROJECT_BLOCK_N_LARGE) {
-        flash_attn_no_tiling_kernel<PROJECT_BLOCK_N_LARGE><<<grid, block, smem_bytes>>>(
-            d_Q, d_K, d_V, d_O, N, d, scale_l2, causal
-        );
-    } else {
-        flash_attn_no_tiling_kernel<PROJECT_BLOCK_N><<<grid, block, smem_bytes>>>(
-            d_Q, d_K, d_V, d_O, N, d, scale_l2, causal
-        );
-    }
+    flash_attn_no_tiling_kernel<PROJECT_BLOCK_N><<<grid, block, smem_bytes>>>(
+        d_Q, d_K, d_V, d_O, N, d, scale_l2, causal
+    );
 
     CUDA_CHECK(cudaGetLastError());
 }
