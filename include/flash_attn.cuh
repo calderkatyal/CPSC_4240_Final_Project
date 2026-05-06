@@ -25,7 +25,7 @@ void flash_attention_v1(
 );
 
 // ============================================================================
-// FA2-inspired extension:
+// Split-KV extension:
 //   - retains the simplified forward-only scope above
 //   - keeps the dense exact attention computation
 //   - adds sequence-parallel split-KV execution with a partial-statistics combine
@@ -37,6 +37,12 @@ void flash_attention_v2(
     project_out_t* d_O,
     int B, int H, int N, int d, float scale, bool causal
 );
+
+void flash_attention_v2_prepare(
+    int B, int H, int N, int d
+);
+
+void flash_attention_v2_release_workspace();
 
 // ============================================================================
 // Ablation variants

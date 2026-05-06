@@ -64,6 +64,14 @@ static __global__ void flash_attention_splitkv_partial_kernel(
 
     __syncthreads();
 
+    wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
+                   PROJECT_TILE, project_in_t,
+                   wmma::row_major> q_frag[d / PROJECT_TILE];
+    #pragma unroll
+    for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
+        wmma::load_matrix_sync(q_frag[k0 / PROJECT_TILE], s_q_warp + k0, d_padded);
+    }
+
     int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
     int tiles_per_split = cdiv(num_kv_tiles, num_splits);
     int kv_tile_begin = split_idx * tiles_per_split;
@@ -112,11 +120,6 @@ static __global__ void flash_attention_splitkv_partial_kernel(
         }
         #pragma unroll
         for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
-            wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
-                           PROJECT_TILE, project_in_t,
-                           wmma::row_major> a;
-            wmma::load_matrix_sync(a, s_q_warp + k0, d_padded);
-
             #pragma unroll
             for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
                 wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
@@ -124,7 +127,7 @@ static __global__ void flash_attention_splitkv_partial_kernel(
                                wmma::col_major> b;
                 wmma::load_matrix_sync(
                     b, s_kv + tn * PROJECT_TILE * d_padded + k0, d_padded);
-                wmma::mma_sync(sf[tn], a, b, sf[tn]);
+                wmma::mma_sync(sf[tn], q_frag[k0 / PROJECT_TILE], b, sf[tn]);
             }
         }
         #pragma unroll
@@ -134,7 +137,7 @@ static __global__ void flash_attention_splitkv_partial_kernel(
                 sf[tn].x[i] *= scale_l2;
         }
 
-        __syncthreads();
+        __syncwarp();
 
         const bool r0v = (global_row0 < N);
         const bool r1v = (global_row1 < N);
@@ -341,17 +344,108 @@ static __global__ void flash_attention_splitkv_combine_kernel(
     }
 }
 
-inline int choose_splitkv_splits(int B, int H, int N) {
+struct SplitkvWorkspace {
+    float* partial_m = nullptr;
+    float* partial_l = nullptr;
+    float* partial_o = nullptr;
+    int capacity_splits = 0;
+    int capacity_bh = 0;
+    int capacity_n = 0;
+    int capacity_d = 0;
+};
+
+inline SplitkvWorkspace& splitkv_workspace() {
+    static SplitkvWorkspace workspace;
+    return workspace;
+}
+
+inline void release_splitkv_workspace() {
+    auto& workspace = splitkv_workspace();
+    if (workspace.partial_m != nullptr) {
+        CUDA_CHECK(tracked_cuda_free(workspace.partial_m));
+        workspace.partial_m = nullptr;
+    }
+    if (workspace.partial_l != nullptr) {
+        CUDA_CHECK(tracked_cuda_free(workspace.partial_l));
+        workspace.partial_l = nullptr;
+    }
+    if (workspace.partial_o != nullptr) {
+        CUDA_CHECK(tracked_cuda_free(workspace.partial_o));
+        workspace.partial_o = nullptr;
+    }
+    workspace.capacity_splits = 0;
+    workspace.capacity_bh = 0;
+    workspace.capacity_n = 0;
+    workspace.capacity_d = 0;
+}
+
+inline void prepare_splitkv_workspace(int BH, int N, int d, int num_splits) {
+    auto& workspace = splitkv_workspace();
+    if (workspace.partial_m != nullptr
+        && num_splits <= workspace.capacity_splits
+        && BH <= workspace.capacity_bh
+        && N <= workspace.capacity_n
+        && d <= workspace.capacity_d) {
+        return;
+    }
+
+    release_splitkv_workspace();
+
+    CUDA_CHECK(tracked_cuda_malloc(
+        reinterpret_cast<void**>(&workspace.partial_m),
+        static_cast<size_t>(num_splits) * BH * N * sizeof(float)
+    ));
+    CUDA_CHECK(tracked_cuda_malloc(
+        reinterpret_cast<void**>(&workspace.partial_l),
+        static_cast<size_t>(num_splits) * BH * N * sizeof(float)
+    ));
+    CUDA_CHECK(tracked_cuda_malloc(
+        reinterpret_cast<void**>(&workspace.partial_o),
+        static_cast<size_t>(num_splits) * BH * N * d * sizeof(float)
+    ));
+
+    workspace.capacity_splits = num_splits;
+    workspace.capacity_bh = BH;
+    workspace.capacity_n = N;
+    workspace.capacity_d = d;
+}
+
+template<int HEAD_DIM>
+inline int choose_splitkv_splits(int B, int H, int N, size_t partial_smem) {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
     int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
-    int effective_sms = prop.multiProcessorCount * 2;
-    return project_num_splits_heuristic(B * H * num_q_tiles, effective_sms, num_kv_tiles, 8);
-}
+    int base_ctas = B * H * num_q_tiles;
+    if (num_kv_tiles <= 1 || base_ctas >= prop.multiProcessorCount) {
+        return 1;
+    }
 
-inline size_t splitkv_workspace_bytes(int B, int H, int N, int d, int num_splits) {
-    return static_cast<size_t>(num_splits) * B * H * N * (2 * sizeof(float) + d * sizeof(float));
+    int ctas_per_sm = 1;
+    if (partial_smem >= 48 * 1024) {
+        CUDA_CHECK(cudaFuncSetAttribute(
+            flash_attention_splitkv_partial_kernel<HEAD_DIM>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            partial_smem
+        ));
+    }
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &ctas_per_sm,
+        flash_attention_splitkv_partial_kernel<HEAD_DIM>,
+        PROJECT_THREADS,
+        partial_smem
+    ));
+    if (ctas_per_sm < 1) {
+        ctas_per_sm = 1;
+    }
+
+    int active_cta_slots = prop.multiProcessorCount * ctas_per_sm;
+    if (base_ctas >= active_cta_slots) {
+        return 1;
+    }
+
+    int max_splits = num_kv_tiles < 4 ? num_kv_tiles : 4;
+    return project_num_splits_heuristic(base_ctas, active_cta_slots, num_kv_tiles, max_splits);
 }
 
 template<int HEAD_DIM>
@@ -373,24 +467,23 @@ inline void launch_flash_attention_splitkv_hdim(
 
     int BH = B * H;
     int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
-    int num_splits = choose_splitkv_splits(B, H, N);
+    size_t partial_smem = 0;
+    partial_smem += PROJECT_BLOCK_M * d_padded * sizeof(project_in_t);
+    partial_smem += kv_buf_elems * sizeof(project_in_t);
+    int num_splits = choose_splitkv_splits<HEAD_DIM>(B, H, N, partial_smem);
     if (num_splits <= 1) {
+        release_splitkv_workspace();
         launch_flash_attention_core_hdim<HEAD_DIM, true>(
             d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
         );
         return;
     }
 
-    float* partial_m_ptr = nullptr;
-    float* partial_l_ptr = nullptr;
-    float* partial_o_ptr = nullptr;
-    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_m_ptr), (size_t)num_splits * BH * N * sizeof(float)));
-    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_l_ptr), (size_t)num_splits * BH * N * sizeof(float)));
-    CUDA_CHECK(tracked_cuda_malloc(reinterpret_cast<void**>(&partial_o_ptr), (size_t)num_splits * BH * N * HEAD_DIM * sizeof(float)));
-
-    size_t partial_smem = 0;
-    partial_smem += PROJECT_BLOCK_M * d_padded * sizeof(project_in_t);
-    partial_smem += kv_buf_elems * sizeof(project_in_t);
+    prepare_splitkv_workspace(BH, N, HEAD_DIM, num_splits);
+    auto& workspace = splitkv_workspace();
+    float* partial_m_ptr = workspace.partial_m;
+    float* partial_l_ptr = workspace.partial_l;
+    float* partial_o_ptr = workspace.partial_o;
 
     dim3 block(PROJECT_THREADS);
     dim3 grid_partial(num_q_tiles, num_splits, BH);
@@ -413,10 +506,6 @@ inline void launch_flash_attention_splitkv_hdim(
         partial_m_ptr, partial_l_ptr, partial_o_ptr, d_O, num_splits, N, HEAD_DIM
     );
     CUDA_CHECK(cudaGetLastError());
-
-    CUDA_CHECK(tracked_cuda_free(partial_m_ptr));
-    CUDA_CHECK(tracked_cuda_free(partial_l_ptr));
-    CUDA_CHECK(tracked_cuda_free(partial_o_ptr));
 }
 
 inline void launch_flash_attention_splitkv(
@@ -453,6 +542,55 @@ inline void launch_flash_attention_splitkv(
             fprintf(stderr, "Unsupported head dimension d=%d in split-KV launcher.\n", d);
             exit(EXIT_FAILURE);
     }
+}
+
+inline void prepare_flash_attention_splitkv_workspace(int B, int H, int N, int d) {
+    check_supported_head_dim(d);
+    switch (d) {
+        case 32: {
+            constexpr int d_padded = 32 + SMEM_PAD;
+            constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
+            constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
+            constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
+            size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
+                                + kv_buf_elems * sizeof(project_in_t);
+            int num_splits = choose_splitkv_splits<32>(B, H, N, partial_smem);
+            if (num_splits > 1) prepare_splitkv_workspace(B * H, N, 32, num_splits);
+            else release_splitkv_workspace();
+            break;
+        }
+        case 64: {
+            constexpr int d_padded = 64 + SMEM_PAD;
+            constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
+            constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
+            constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
+            size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
+                                + kv_buf_elems * sizeof(project_in_t);
+            int num_splits = choose_splitkv_splits<64>(B, H, N, partial_smem);
+            if (num_splits > 1) prepare_splitkv_workspace(B * H, N, 64, num_splits);
+            else release_splitkv_workspace();
+            break;
+        }
+        case 128: {
+            constexpr int d_padded = 128 + SMEM_PAD;
+            constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
+            constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
+            constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
+            size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
+                                + kv_buf_elems * sizeof(project_in_t);
+            int num_splits = choose_splitkv_splits<128>(B, H, N, partial_smem);
+            if (num_splits > 1) prepare_splitkv_workspace(B * H, N, 128, num_splits);
+            else release_splitkv_workspace();
+            break;
+        }
+        default:
+            fprintf(stderr, "Unsupported head dimension d=%d in split-KV workspace preparation.\n", d);
+            exit(EXIT_FAILURE);
+    }
+}
+
+inline void release_flash_attention_splitkv_workspace() {
+    release_splitkv_workspace();
 }
 
 }  // namespace project_flash

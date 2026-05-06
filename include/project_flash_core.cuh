@@ -213,6 +213,14 @@ static __global__ void flash_attention_core_kernel(
 
     __syncthreads();
 
+    wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
+                   PROJECT_TILE, project_in_t,
+                   wmma::row_major> q_frag[d / PROJECT_TILE];
+    #pragma unroll
+    for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
+        wmma::load_matrix_sync(q_frag[k0 / PROJECT_TILE], s_q_warp + k0, d_padded);
+    }
+
     int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
     if (causal) {
         int q_end = q_block_start + PROJECT_BLOCK_M - 1;
@@ -259,11 +267,6 @@ static __global__ void flash_attention_core_kernel(
 
         #pragma unroll
         for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
-            wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
-                           PROJECT_TILE, project_in_t,
-                           wmma::row_major> a;
-            wmma::load_matrix_sync(a, s_q_warp + k0, d_padded);
-
             #pragma unroll
             for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
                 wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
@@ -272,7 +275,7 @@ static __global__ void flash_attention_core_kernel(
                 wmma::load_matrix_sync(
                     b, s_kv + tn * PROJECT_TILE * d_padded + k0, d_padded
                 );
-                wmma::mma_sync(sf[tn], a, b, sf[tn]);
+                wmma::mma_sync(sf[tn], q_frag[k0 / PROJECT_TILE], b, sf[tn]);
             }
         }
 
@@ -284,7 +287,7 @@ static __global__ void flash_attention_core_kernel(
             }
         }
 
-        __syncthreads();
+        __syncwarp();
 
         const bool r0v = (global_row0 < N);
         const bool r1v = (global_row1 < N);

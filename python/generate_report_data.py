@@ -13,14 +13,14 @@ SPEEDUP_BASELINE = "PyTorch attention baseline (fp16)"
 RUNTIME_METHODS = [
     (SPEEDUP_BASELINE, "PyTorch baseline"),
     ("Simplified FA1", "Simplified FA1"),
-    ("FA2-inspired extension", "FA2-inspired extension"),
+    ("Split-KV extension", "Split-KV extension"),
     ("Official FlashAttention-1 (fp16)", "Official FlashAttention-1"),
     ("Official FlashAttention-2 (fp16)", "Official FlashAttention-2"),
 ]
 
 SPEEDUP_METHODS = [
     ("Simplified FA1", "Simplified FA1"),
-    ("FA2-inspired extension", "FA2-inspired extension"),
+    ("Split-KV extension", "Split-KV extension"),
     ("Official FlashAttention-1 (fp16)", "Official FlashAttention-1"),
     ("Official FlashAttention-2 (fp16)", "Official FlashAttention-2"),
 ]
