@@ -239,6 +239,8 @@ The simplified FA1 kernel and the FA2-inspired kernel also share most of the sam
 \subsection{Kernel layout}
 Our CUDA implementation uses $16 \times 16$ WMMA fragments, but the full thread-block work unit is larger: each block processes a $64$-row query block and iterates over the sequence in $64$-key / $64$-value blocks. The query block and the current K/V block are staged in shared memory, while each active query row maintains its running maximum, running normalization constant, and running output vector in FP32 across KV-block iterations. Once all KV blocks have been processed, the output accumulator is normalized and written back to global memory.
 
+Figure~\ref{fig:hbm_sram_map} makes the memory-hierarchy mapping explicit: HBM stores the full $Q$, $K$, $V$, and $O$ tensors, while SRAM and other on-chip state hold only the current query tile, the current K/V tile, and the row-wise running state needed for exact online softmax. The full $N \times N$ score matrix is never materialized.
+
 The FA2-inspired kernel keeps the same intra-block computation but changes how the KV range is traversed. Instead of assigning the full KV range to one block, it partitions the KV blocks into splits. Each split produces partial $m$, $\ell$, and $o$ values, and a second kernel combines them exactly. This split/combine structure is the main implementation difference between our FA1 and FA2-inspired forward paths.
 
 \begin{figure}[H]
@@ -257,6 +259,32 @@ The FA2-inspired kernel keeps the same intra-block computation but changes how t
     }
     \caption{Conceptual on-chip organization for the simplified FA1 kernel. The key idea is that only the current query/KV blocks and row-wise running state must remain resident, rather than the full score matrix.}
     \label{fig:smem_view}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \fbox{
+        \parbox{0.94\linewidth}{
+            \centering
+            \small
+            \textbf{How Tiles Map onto HBM and SRAM}\\[5pt]
+            \textbf{HBM (global memory)}\\[3pt]
+            \fbox{\parbox{0.18\linewidth}{\centering full $Q$\\tensor}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering full $K$\\tensor}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering full $V$\\tensor}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering final $O$\\tensor}}\\[5pt]
+            $\Downarrow$ \hspace{3pt} \textit{one thread block loads only the current working set} \hspace{3pt} $\Downarrow$\\[5pt]
+            \textbf{SRAM / on-chip working set for one block}\\[3pt]
+            \fbox{\parbox{0.18\linewidth}{\centering $Q_i$ tile\\$64 \times d$}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering $K_j^\top$ tile\\$64 \times d$}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering $V_j$ tile\\$64 \times d$}} \hfill
+            \fbox{\parbox{0.18\linewidth}{\centering running $(m,\ell,o)$\\per active row}}\\[5pt]
+            \fbox{\parbox{0.82\linewidth}{\centering Ephemeral $16 \times 16$ WMMA score subtiles are computed, consumed immediately by the online softmax update, and then discarded.}}\\[4pt]
+            \fbox{\parbox{0.82\linewidth}{\centering No full $N \times N$ score matrix is stored in either HBM or SRAM.}}
+        }
+    }
+    \caption{Explicit memory-hierarchy view of the simplified FA1 kernel. HBM holds the full input/output tensors, while SRAM holds only the current query tile, key/value tile, and row-wise online-softmax state for one thread block.}
+    \label{fig:hbm_sram_map}
 \end{figure}
 
 \begin{table}[H]
