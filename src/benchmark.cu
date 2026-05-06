@@ -151,6 +151,7 @@ int main(int argc, char** argv) {
 
     MethodEntry methods[] = {
         {"Simplified FA1", flash_attention_v1},
+        {"FA2-inspired extension", flash_attention_v2},
         {"Ablation: no tensor cores", flash_attention_v1_no_tensor_cores},
         {"Ablation: no vectorized loads", flash_attention_v1_no_vectorized_loads},
         {"Ablation: no online softmax", flash_attention_v1_no_online_softmax},

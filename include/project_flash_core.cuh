@@ -14,15 +14,16 @@ namespace wmma = nvcuda::wmma;
 // worst shared-memory bank-alignment pattern.
 constexpr int SMEM_PAD = 8;
 
-template<int D_PADDED, int BN_PADDED>
+template<int BLOCK_M, int BLOCK_N, int D_PADDED, int BN_PADDED>
 __host__ __device__ constexpr int shared_kv_buffer_elems() {
-    constexpr int kv_tile_elems = PROJECT_BLOCK_N * D_PADDED;
-    constexpr int p_tile_elems = PROJECT_BLOCK_M * BN_PADDED;
+    constexpr int kv_tile_elems = BLOCK_N * D_PADDED;
+    constexpr int p_tile_elems = BLOCK_M * BN_PADDED;
     return kv_tile_elems > p_tile_elems ? kv_tile_elems : p_tile_elems;
 }
 
 // ---- Legacy helpers used by ablation kernels (unpadded strides) --------
 
+template<int BLOCK_N>
 __device__ inline void load_kv_block(
     project_in_t* s_kt,
     project_in_t* s_v,
@@ -33,7 +34,7 @@ __device__ inline void load_kv_block(
     int d
 ) {
     const project_in_t zero = __float2half(0.0f);
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_N * d; idx += blockDim.x) {
+    for (int idx = threadIdx.x; idx < BLOCK_N * d; idx += blockDim.x) {
         int row = idx / d;
         int col = idx % d;
         int global_row = kv_start + row;
@@ -81,6 +82,7 @@ __device__ inline void compute_score_tile_tensor_core(
     wmma::store_matrix_sync(s_scores, c_frag, score_stride, wmma::mem_row_major);
 }
 
+template<int BLOCK_N>
 __device__ inline void compute_score_block_tensor_core(
     float* s_scores,
     const project_in_t* s_q,
@@ -88,14 +90,15 @@ __device__ inline void compute_score_block_tensor_core(
     int d,
     float scale
 ) {
+    constexpr int k_tiles_per_block = BLOCK_N / PROJECT_TILE;
     #pragma unroll
-    for (int tile_idx = 0; tile_idx < PROJECT_K_TILES_PER_BLOCK; tile_idx++) {
+    for (int tile_idx = 0; tile_idx < k_tiles_per_block; tile_idx++) {
         compute_score_tile_tensor_core(
             s_scores + tile_idx * PROJECT_TILE,
             s_q,
             s_kt + tile_idx * PROJECT_TILE * d,
             d,
-            PROJECT_BLOCK_N,
+            BLOCK_N,
             scale
         );
     }
@@ -163,7 +166,7 @@ __device__ inline void load_padded_rowmajor_tile(
     }
 }
 
-template<int HEAD_DIM, bool UseVecLoads>
+template<int HEAD_DIM, int Q_WARPS, int BLOCK_N, bool UseVecLoads>
 static __global__ void flash_attention_core_kernel(
     const project_in_t* __restrict__ Q,
     const project_in_t* __restrict__ K,
@@ -176,12 +179,14 @@ static __global__ void flash_attention_core_kernel(
     constexpr int d = HEAD_DIM;
     constexpr int num_o_frags = HEAD_DIM / PROJECT_TILE;
     constexpr int d_padded = HEAD_DIM + SMEM_PAD;
-    constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
+    constexpr int block_m = PROJECT_TILE * Q_WARPS;
+    constexpr int bn_padded = BLOCK_N + SMEM_PAD;
+    constexpr int k_tiles_per_block = BLOCK_N / PROJECT_TILE;
 
     const int batch_head = blockIdx.z;
     const int warp_id = threadIdx.x / PROJECT_WARP_SIZE;
     const int lane = threadIdx.x % PROJECT_WARP_SIZE;
-    const int q_block_start = blockIdx.x * PROJECT_BLOCK_M;
+    const int q_block_start = blockIdx.x * block_m;
     const int q_start = q_block_start + warp_id * PROJECT_TILE;
 
     const int fg = lane / 4;
@@ -198,13 +203,13 @@ static __global__ void flash_attention_core_kernel(
 
     extern __shared__ __align__(32) unsigned char smem_raw[];
     project_in_t* s_q  = reinterpret_cast<project_in_t*>(smem_raw);
-    project_in_t* s_kv = s_q + PROJECT_BLOCK_M * d_padded;
+    project_in_t* s_kv = s_q + block_m * d_padded;
     project_in_t* s_p  = s_kv;
 
     project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d_padded;
     project_in_t* s_p_warp = s_p + warp_id * PROJECT_TILE * bn_padded;
 
-    load_padded_rowmajor_tile<PROJECT_BLOCK_M, d, d_padded, UseVecLoads>(
+    load_padded_rowmajor_tile<block_m, d, d_padded, UseVecLoads>(
         s_q, q_base, q_block_start, N
     );
 
@@ -228,27 +233,27 @@ static __global__ void flash_attention_core_kernel(
         wmma::load_matrix_sync(q_frag[k0 / PROJECT_TILE], s_q_warp + k0, d_padded);
     }
 
-    int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
+    int num_kv_tiles = cdiv(N, BLOCK_N);
     if (causal) {
-        int q_end = q_block_start + PROJECT_BLOCK_M - 1;
+        int q_end = q_block_start + block_m - 1;
         if (q_end >= N) q_end = N - 1;
-        int causal_limit = cdiv(q_end + 1, PROJECT_BLOCK_N);
+        int causal_limit = cdiv(q_end + 1, BLOCK_N);
         if (causal_limit < num_kv_tiles) num_kv_tiles = causal_limit;
     }
 
     for (int kv_tile = 0; kv_tile < num_kv_tiles; kv_tile++) {
-        const int kv_start = kv_tile * PROJECT_BLOCK_N;
+        const int kv_start = kv_tile * BLOCK_N;
 
-        load_padded_rowmajor_tile<PROJECT_BLOCK_N, d, d_padded, UseVecLoads>(
+        load_padded_rowmajor_tile<BLOCK_N, d, d_padded, UseVecLoads>(
             s_kv, v_base, kv_start, N
         );
         __syncthreads();
 
         wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
                        PROJECT_TILE, project_in_t,
-                       wmma::row_major> v_frag[PROJECT_K_TILES_PER_BLOCK][num_o_frags];
+                       wmma::row_major> v_frag[k_tiles_per_block][num_o_frags];
         #pragma unroll
-        for (int kk = 0; kk < PROJECT_BLOCK_N; kk += PROJECT_TILE) {
+        for (int kk = 0; kk < BLOCK_N; kk += PROJECT_TILE) {
             #pragma unroll
             for (int dd = 0; dd < d; dd += PROJECT_TILE) {
                 wmma::load_matrix_sync(
@@ -260,22 +265,22 @@ static __global__ void flash_attention_core_kernel(
         }
 
         __syncthreads();
-        load_padded_rowmajor_tile<PROJECT_BLOCK_N, d, d_padded, UseVecLoads>(
+        load_padded_rowmajor_tile<BLOCK_N, d, d_padded, UseVecLoads>(
             s_kv, k_base, kv_start, N
         );
         __syncthreads();
 
         wmma::fragment<wmma::accumulator, PROJECT_TILE, PROJECT_TILE,
-                       PROJECT_TILE, float> sf[PROJECT_K_TILES_PER_BLOCK];
+                       PROJECT_TILE, float> sf[k_tiles_per_block];
         #pragma unroll
-        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+        for (int tn = 0; tn < k_tiles_per_block; tn++) {
             wmma::fill_fragment(sf[tn], 0.0f);
         }
 
         #pragma unroll
         for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
             #pragma unroll
-            for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+            for (int tn = 0; tn < k_tiles_per_block; tn++) {
                 wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
                                PROJECT_TILE, project_in_t,
                                wmma::col_major> b;
@@ -287,7 +292,7 @@ static __global__ void flash_attention_core_kernel(
         }
 
         #pragma unroll
-        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+        for (int tn = 0; tn < k_tiles_per_block; tn++) {
             #pragma unroll
             for (int i = 0; i < sf[tn].num_elements; i++) {
                 sf[tn].x[i] *= scale_l2;
@@ -301,7 +306,7 @@ static __global__ void flash_attention_core_kernel(
 
         float mx0 = -FLT_MAX, mx1 = -FLT_MAX;
         #pragma unroll
-        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+        for (int tn = 0; tn < k_tiles_per_block; tn++) {
             int bc = kv_start + tn * PROJECT_TILE;
             int c0 = bc + fp * 2;
             int c1 = c0 + 1;
@@ -340,7 +345,7 @@ static __global__ void flash_attention_core_kernel(
 
         float sum0 = 0.0f, sum1 = 0.0f;
         #pragma unroll
-        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+        for (int tn = 0; tn < k_tiles_per_block; tn++) {
             int bc = kv_start + tn * PROJECT_TILE;
             int c0 = bc + fp * 2;
             int c1 = c0 + 1;
@@ -389,7 +394,7 @@ static __global__ void flash_attention_core_kernel(
         __syncwarp();
 
         #pragma unroll
-        for (int kk = 0; kk < PROJECT_BLOCK_N; kk += PROJECT_TILE) {
+        for (int kk = 0; kk < BLOCK_N; kk += PROJECT_TILE) {
             wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
                            PROJECT_TILE, project_in_t,
                            wmma::row_major> pf;
@@ -431,7 +436,7 @@ static __global__ void flash_attention_core_kernel(
     }
 }
 
-template<int HEAD_DIM, bool UseVecLoads>
+template<int HEAD_DIM, int Q_WARPS, int BLOCK_N, bool UseVecLoads>
 inline void launch_flash_attention_core_hdim(
     const project_in_t* d_Q,
     const project_in_t* d_K,
@@ -443,32 +448,57 @@ inline void launch_flash_attention_core_hdim(
     float scale_l2,
     bool causal
 ) {
+    constexpr int block_m = PROJECT_TILE * Q_WARPS;
+    constexpr int threads = PROJECT_WARP_SIZE * Q_WARPS;
     constexpr int d_padded = HEAD_DIM + SMEM_PAD;
-    constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-    constexpr int kv_buf_elems = shared_kv_buffer_elems<d_padded, bn_padded>();
+    constexpr int bn_padded = BLOCK_N + SMEM_PAD;
+    constexpr int kv_buf_elems = shared_kv_buffer_elems<block_m, BLOCK_N, d_padded, bn_padded>();
 
     const int BH = B * H;
-    const int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
+    const int num_q_tiles = cdiv(N, block_m);
 
     size_t smem_bytes = 0;
-    smem_bytes += PROJECT_BLOCK_M * d_padded * sizeof(project_in_t);
+    smem_bytes += block_m * d_padded * sizeof(project_in_t);
     smem_bytes += kv_buf_elems * sizeof(project_in_t);
 
-    dim3 block(PROJECT_THREADS);
+    dim3 block(threads);
     dim3 grid(num_q_tiles, 1, BH);
 
     if (smem_bytes >= 48 * 1024) {
         CUDA_CHECK(cudaFuncSetAttribute(
-            flash_attention_core_kernel<HEAD_DIM, UseVecLoads>,
+            flash_attention_core_kernel<HEAD_DIM, Q_WARPS, BLOCK_N, UseVecLoads>,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             smem_bytes
         ));
     }
 
-    flash_attention_core_kernel<HEAD_DIM, UseVecLoads><<<grid, block, smem_bytes>>>(
+    flash_attention_core_kernel<HEAD_DIM, Q_WARPS, BLOCK_N, UseVecLoads><<<grid, block, smem_bytes>>>(
         d_Q, d_K, d_V, d_O, N, scale_l2, causal
     );
     CUDA_CHECK(cudaGetLastError());
+}
+
+template<int HEAD_DIM, int Q_WARPS, bool UseVecLoads>
+inline void dispatch_flash_attention_core_blockn(
+    const project_in_t* d_Q,
+    const project_in_t* d_K,
+    const project_in_t* d_V,
+    project_out_t* d_O,
+    int B,
+    int H,
+    int N,
+    float scale_l2,
+    bool causal
+) {
+    if (project_block_n_for_head_dim(HEAD_DIM, N) == PROJECT_BLOCK_N_LARGE) {
+        launch_flash_attention_core_hdim<HEAD_DIM, Q_WARPS, PROJECT_BLOCK_N_LARGE, UseVecLoads>(
+            d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+        );
+    } else {
+        launch_flash_attention_core_hdim<HEAD_DIM, Q_WARPS, PROJECT_BLOCK_N, UseVecLoads>(
+            d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+        );
+    }
 }
 
 template<bool UseVecLoads>
@@ -487,22 +517,58 @@ inline void launch_flash_attention_core_impl(
     const float scale_l2 = scale * PROJECT_LOG2E;
     switch (d) {
         case 32:
-            launch_flash_attention_core_hdim<32, UseVecLoads>(
+            dispatch_flash_attention_core_blockn<32, PROJECT_Q_WARPS, UseVecLoads>(
                 d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
             );
             break;
         case 64:
-            launch_flash_attention_core_hdim<64, UseVecLoads>(
+            dispatch_flash_attention_core_blockn<64, PROJECT_Q_WARPS, UseVecLoads>(
                 d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
             );
             break;
         case 128:
-            launch_flash_attention_core_hdim<128, UseVecLoads>(
+            dispatch_flash_attention_core_blockn<128, PROJECT_Q_WARPS, UseVecLoads>(
                 d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
             );
             break;
         default:
             fprintf(stderr, "Unsupported head dimension d=%d in FA1 launcher.\n", d);
+            exit(EXIT_FAILURE);
+    }
+}
+
+template<bool UseVecLoads>
+inline void launch_flash_attention_fa2_impl(
+    const project_in_t* d_Q,
+    const project_in_t* d_K,
+    const project_in_t* d_V,
+    project_out_t* d_O,
+    int B,
+    int H,
+    int N,
+    int d,
+    float scale,
+    bool causal
+) {
+    const float scale_l2 = scale * PROJECT_LOG2E;
+    switch (d) {
+        case 32:
+            dispatch_flash_attention_core_blockn<32, 8, UseVecLoads>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 64:
+            dispatch_flash_attention_core_blockn<64, 8, UseVecLoads>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        case 128:
+            dispatch_flash_attention_core_blockn<128, PROJECT_Q_WARPS, UseVecLoads>(
+                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
+            );
+            break;
+        default:
+            fprintf(stderr, "Unsupported head dimension d=%d in FA2-inspired launcher.\n", d);
             exit(EXIT_FAILURE);
     }
 }
@@ -539,6 +605,24 @@ inline void launch_flash_attention_core_no_vectorized_loads(
 ) {
     check_supported_head_dim(d);
     launch_flash_attention_core_impl<false>(
+        d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
+    );
+}
+
+inline void launch_flash_attention_fa2_extension(
+    const project_in_t* d_Q,
+    const project_in_t* d_K,
+    const project_in_t* d_V,
+    project_out_t* d_O,
+    int B,
+    int H,
+    int N,
+    int d,
+    float scale,
+    bool causal
+) {
+    check_supported_head_dim(d);
+    launch_flash_attention_fa2_impl<true>(
         d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
     );
 }

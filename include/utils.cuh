@@ -82,10 +82,22 @@ constexpr int PROJECT_WARP_SIZE = 32;
 constexpr int PROJECT_Q_WARPS = 4;
 constexpr int PROJECT_BLOCK_M = PROJECT_TILE * PROJECT_Q_WARPS;
 constexpr int PROJECT_BLOCK_N = 128;
+constexpr int PROJECT_BLOCK_N_LARGE = 256;
 constexpr int PROJECT_K_TILES_PER_BLOCK = PROJECT_BLOCK_N / PROJECT_TILE;
 constexpr int PROJECT_THREADS = PROJECT_WARP_SIZE * PROJECT_Q_WARPS;
 constexpr int PROJECT_MAX_D = 128;
 constexpr float PROJECT_LOG2E = 1.4426950408889634f;
+
+inline int project_block_n_for_head_dim(int d, int N) {
+    if (d <= 64 && N >= PROJECT_BLOCK_N_LARGE) {
+        return PROJECT_BLOCK_N_LARGE;
+    }
+    return PROJECT_BLOCK_N;
+}
+
+inline int project_fa2_q_warps_for_head_dim(int d) {
+    return d <= 64 ? 8 : PROJECT_Q_WARPS;
+}
 
 inline bool project_is_supported_head_dim(int d) {
     return d == 32 || d == 64 || d == 128;
@@ -123,8 +135,10 @@ inline void convert_float_to_project_input(
 inline void print_project_precision_summary(int d) {
     printf("Project kernel precision: FP16 Q/K/V inputs, FP32 softmax/output accumulation\n");
     printf("Tensor-core score path: enabled for supported head dims {32, 64, 128}; current d=%d\n", d);
-    printf("Thread-block tile sizes: Q-block=%d rows, KV-block=%d rows\n",
-           PROJECT_BLOCK_M, PROJECT_BLOCK_N);
+    printf("Simplified FA1 thread-block tiles: Q-block=%d rows, KV-block=%d or %d rows\n",
+           PROJECT_BLOCK_M, PROJECT_BLOCK_N, PROJECT_BLOCK_N_LARGE);
+    printf("FA2-inspired extension: wider query ownership with %d-row Q blocks for d<=64\n",
+           PROJECT_TILE * project_fa2_q_warps_for_head_dim(d));
 }
 
 inline int project_num_splits_heuristic(

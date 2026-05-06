@@ -1,15 +1,11 @@
-// Later-version split-KV forward extension.
+// FA2-inspired forward extension.
 //
-// The official FlashAttention-2 contribution is a more ambitious redesign of
-// work partitioning and non-matmul overhead. The narrow idea we model here is:
-//   - sequence-parallel split-KV execution, where multiple thread blocks
-//     process disjoint KV partitions for the same query tile and then combine
-//     the partial log-sum-exp/output statistics
-//
-// This keeps one later-version-style split/combine mechanism without claiming
-// to reproduce the full native FA2 kernel family.
+// In this project, the later-version-inspired change is wider query ownership
+// per CTA. That keeps the compact WMMA kernel structure, but repartitions work
+// so each block amortizes K/V tile loads across more query rows, echoing
+// FlashAttention-2's broader emphasis on better work partitioning.
 
-#include "project_flash_splitkv.cuh"
+#include "project_flash_core.cuh"
 
 void flash_attention_v2(
     const project_in_t* d_Q,
@@ -23,7 +19,7 @@ void flash_attention_v2(
     float scale,
     bool causal
 ) {
-    project_flash::launch_flash_attention_splitkv(
+    project_flash::launch_flash_attention_fa2_extension(
         d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
     );
 }

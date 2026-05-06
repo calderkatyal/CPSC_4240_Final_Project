@@ -462,7 +462,7 @@ inline void launch_flash_attention_splitkv_hdim(
 ) {
     constexpr int d_padded = HEAD_DIM + SMEM_PAD;
     constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-    constexpr int kv_buf_elems = shared_kv_buffer_elems<d_padded, bn_padded>();
+    constexpr int kv_buf_elems = shared_kv_buffer_elems<PROJECT_BLOCK_M, PROJECT_BLOCK_N, d_padded, bn_padded>();
 
     int BH = B * H;
     int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
@@ -549,7 +549,7 @@ inline void prepare_flash_attention_splitkv_workspace(int B, int H, int N, int d
         case 32: {
             constexpr int d_padded = 32 + SMEM_PAD;
             constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-            constexpr int kv_buf_elems = shared_kv_buffer_elems<d_padded, bn_padded>();
+            constexpr int kv_buf_elems = shared_kv_buffer_elems<PROJECT_BLOCK_M, PROJECT_BLOCK_N, d_padded, bn_padded>();
             size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
                                 + kv_buf_elems * sizeof(project_in_t);
             int num_splits = choose_splitkv_splits<32>(B, H, N, partial_smem);
@@ -560,7 +560,7 @@ inline void prepare_flash_attention_splitkv_workspace(int B, int H, int N, int d
         case 64: {
             constexpr int d_padded = 64 + SMEM_PAD;
             constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-            constexpr int kv_buf_elems = shared_kv_buffer_elems<d_padded, bn_padded>();
+            constexpr int kv_buf_elems = shared_kv_buffer_elems<PROJECT_BLOCK_M, PROJECT_BLOCK_N, d_padded, bn_padded>();
             size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
                                 + kv_buf_elems * sizeof(project_in_t);
             int num_splits = choose_splitkv_splits<64>(B, H, N, partial_smem);
@@ -571,7 +571,7 @@ inline void prepare_flash_attention_splitkv_workspace(int B, int H, int N, int d
         case 128: {
             constexpr int d_padded = 128 + SMEM_PAD;
             constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-            constexpr int kv_buf_elems = shared_kv_buffer_elems<d_padded, bn_padded>();
+            constexpr int kv_buf_elems = shared_kv_buffer_elems<PROJECT_BLOCK_M, PROJECT_BLOCK_N, d_padded, bn_padded>();
             size_t partial_smem = PROJECT_BLOCK_M * d_padded * sizeof(project_in_t)
                                 + kv_buf_elems * sizeof(project_in_t);
             int num_splits = choose_splitkv_splits<128>(B, H, N, partial_smem);

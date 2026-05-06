@@ -25,10 +25,11 @@ void flash_attention_v1(
 );
 
 // ============================================================================
-// Split-KV extension:
+// FA2-inspired extension:
 //   - retains the simplified forward-only scope above
 //   - keeps the dense exact attention computation
-//   - adds sequence-parallel split-KV execution with a partial-statistics combine
+//   - repartitions each CTA to own a wider query block, reducing repeated K/V
+//     tile traffic and amortizing fixed softmax overhead across more rows
 //
 // Note: this is not a full implementation of official FlashAttention-2.
 // ============================================================================
