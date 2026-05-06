@@ -1,13 +1,13 @@
 """
-GPU benchmark runner for the simplified FlashAttention project.
+GPU benchmark runner for the local FA1 kernel.
 
 This script runs the local CUDA benchmark binary and then merges any separately
 generated official FlashAttention CSVs into one comparison file.
 
 Official FlashAttention-1 and FlashAttention-2 should be benchmarked from
-separate invocations of `python/benchmark_official_flash_attn.py`. In this
-project setup, FA1 is imported from a source tree via `--source-dir`, while
-FA2 is imported from the installed `flash_attn` wheel.
+separate invocations of `python/benchmark_official_flash_attn.py`. FA1 is
+imported from a source tree via `--source-dir`, while FA2 is imported from the
+installed `flash_attn` wheel.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def load_rows(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def run_project_benchmark_binary() -> None:
+def run_benchmark_binary() -> None:
     benchmark_bin = ROOT_DIR / "benchmark"
     if not benchmark_bin.exists():
         raise FileNotFoundError(
@@ -48,11 +48,11 @@ def run_project_benchmark_binary() -> None:
 
 
 def merge_results() -> list[dict]:
-    project_path = RESULTS_DIR / "benchmark_results.csv"
-    if not project_path.exists():
+    benchmark_path = RESULTS_DIR / "benchmark_results.csv"
+    if not benchmark_path.exists():
         raise FileNotFoundError("Expected results/benchmark_results.csv after running ./benchmark.")
 
-    merged = load_rows(project_path)
+    merged = load_rows(benchmark_path)
     optional_paths = [
         RESULTS_DIR / "official_pytorch_baseline_results.csv",
         RESULTS_DIR / "official_flash_attn_v1_results.csv",
@@ -69,7 +69,7 @@ def merge_results() -> list[dict]:
 
 
 def main() -> None:
-    run_project_benchmark_binary()
+    run_benchmark_binary()
     merge_results()
     print("Generating LaTeX table data from merged results...")
     subprocess.run([sys.executable, str(ROOT_DIR / "python" / "generate_report_data.py")], cwd=ROOT_DIR, check=True)

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "flash_attn.cuh"
+#include "utils.cuh"
 
 #include <mma.h>
 
@@ -21,104 +21,13 @@ __host__ __device__ constexpr int shared_kv_buffer_elems() {
     return kv_tile_elems > p_tile_elems ? kv_tile_elems : p_tile_elems;
 }
 
-// ---- Legacy helpers used by ablation kernels (unpadded strides) --------
-
-template<int BLOCK_N>
-__device__ inline void load_kv_block(
-    project_in_t* s_kt,
-    project_in_t* s_v,
-    const project_in_t* k_base,
-    const project_in_t* v_base,
-    int kv_start,
-    int N,
-    int d
-) {
-    const project_in_t zero = __float2half(0.0f);
-    for (int idx = threadIdx.x; idx < BLOCK_N * d; idx += blockDim.x) {
-        int row = idx / d;
-        int col = idx % d;
-        int global_row = kv_start + row;
-
-        project_in_t k_val = zero;
-        project_in_t v_val = zero;
-        if (global_row < N) {
-            k_val = k_base[global_row * d + col];
-            if (v_base != nullptr) {
-                v_val = v_base[global_row * d + col];
-            }
-        }
-
-        s_kt[col + row * d] = k_val;
-        if (s_v != nullptr) {
-            s_v[row * d + col] = v_val;
-        }
-    }
-}
-
-__device__ inline void compute_score_tile_tensor_core(
-    float* s_scores,
-    const project_in_t* s_q,
-    const project_in_t* s_kt,
-    int d,
-    int score_stride,
-    float scale
-) {
-    wmma::fragment<wmma::accumulator, PROJECT_TILE, PROJECT_TILE, PROJECT_TILE, float> c_frag;
-    wmma::fill_fragment(c_frag, 0.0f);
-
-    for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
-        wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE, PROJECT_TILE, project_in_t, wmma::row_major> a_frag;
-        wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE, PROJECT_TILE, project_in_t, wmma::col_major> b_frag;
-
-        wmma::load_matrix_sync(a_frag, s_q + k0, d);
-        wmma::load_matrix_sync(b_frag, s_kt + k0, d);
-        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-    }
-
-    for (int i = 0; i < c_frag.num_elements; i++) {
-        c_frag.x[i] *= scale;
-    }
-
-    wmma::store_matrix_sync(s_scores, c_frag, score_stride, wmma::mem_row_major);
-}
-
-template<int BLOCK_N>
-__device__ inline void compute_score_block_tensor_core(
-    float* s_scores,
-    const project_in_t* s_q,
-    const project_in_t* s_kt,
-    int d,
-    float scale
-) {
-    constexpr int k_tiles_per_block = BLOCK_N / PROJECT_TILE;
-    #pragma unroll
-    for (int tile_idx = 0; tile_idx < k_tiles_per_block; tile_idx++) {
-        compute_score_tile_tensor_core(
-            s_scores + tile_idx * PROJECT_TILE,
-            s_q,
-            s_kt + tile_idx * PROJECT_TILE * d,
-            d,
-            BLOCK_N,
-            scale
-        );
-    }
-}
-
-// ========================================================================
-// Core FA1 kernel — register-resident O / scores with native-like memory use
+// Forward kernel for dense causal self-attention.
 //
-// Key optimizations in the main path:
-//   1. Compile-time head-dim dispatch, mirroring native FA1's specialized
-//      kernels for common head dimensions.
-//   2. 16-byte vectorized Q/K/V tile loads (the official code uses uint4
-//      global-memory transactions in its tile loaders).
-//   3. Shared-memory staging for both K and V. Native FA1 can profitably keep
-//      more V state in registers, but in this concise WMMA kernel that
-//      straight-line translation over-inflates register pressure.
-//   4. Loop ordering that reuses loaded Q fragments across K tiles and reuses
-//      loaded P fragments across output-dimension tiles.
-//   5. exp2-based online softmax scaling, matching the official softmax path.
-// ========================================================================
+// The implementation keeps the FA1 structure that matters most:
+//   1. stage Q and each K/V block in shared memory,
+//   2. form score tiles with WMMA,
+//   3. update the rowwise online softmax statistics across K/V blocks,
+//   4. immediately accumulate P @ V into the output fragments.
 
 template<int ROWS, int COLS, int COLS_PADDED, bool UseVecLoads>
 __device__ inline void load_padded_rowmajor_tile(

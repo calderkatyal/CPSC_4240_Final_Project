@@ -1,14 +1,8 @@
-// Benchmark suite
-//
-// This benchmark exercises:
-//   - a simplified FA1-style kernel with tensor-core score tiles
-//   - FA1 ablations for tensor cores, vectorized loads, online softmax,
-//     and SRAM tiling
+// Benchmark suite for the FA1 kernel and its ablations.
 //
 // Correctness is checked against a host-side float32 reference. The shared
-// PyTorch baseline and official FlashAttention baselines are benchmarked from
-// the Python harness so that the same eager-attention reference can be used
-// across all merged comparisons.
+// PyTorch baseline and the official FlashAttention baselines are measured from
+// the Python harness so every merged comparison uses the same denominator.
 
 #include "flash_attn.cuh"
 #include <algorithm>
@@ -16,13 +10,13 @@
 #include <string>
 #include <vector>
 
-using ProjectKernelFn = void (*)(
+using KernelFn = void (*)(
     const project_in_t*, const project_in_t*, const project_in_t*, project_out_t*,
     int, int, int, int, float, bool
 );
 
 float benchmark_kernel(
-    ProjectKernelFn fn,
+    KernelFn fn,
     const project_in_t* d_Q,
     const project_in_t* d_K,
     const project_in_t* d_V,
@@ -61,7 +55,7 @@ float benchmark_kernel(
 }
 
 size_t measure_kernel_peak_memory(
-    ProjectKernelFn fn,
+    KernelFn fn,
     const project_in_t* d_Q,
     const project_in_t* d_K,
     const project_in_t* d_V,
@@ -78,15 +72,15 @@ size_t measure_kernel_peak_memory(
         fn(d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
-    project_cuda_memory_tracking_reset_peak();
+    cuda_memory_tracking_reset_peak();
     fn(d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal);
     CUDA_CHECK(cudaDeviceSynchronize());
-    return project_cuda_memory_tracking_peak_bytes();
+    return cuda_memory_tracking_peak_bytes();
 }
 
 void run_correctness_check(
     const char* name,
-    ProjectKernelFn fn,
+    KernelFn fn,
     const float* h_ref,
     const project_in_t* d_Q,
     const project_in_t* d_K,
@@ -109,7 +103,7 @@ void run_correctness_check(
     CUDA_CHECK(cudaMemcpy(
         h_O_raw.data(), d_O, total * sizeof(project_out_t), cudaMemcpyDeviceToHost
     ));
-    convert_project_output_to_float(h_O_raw.data(), h_O.data(), (int)total);
+    convert_output_to_float(h_O_raw.data(), h_O.data(), (int)total);
 
     float err = max_abs_diff(h_ref, h_O.data(), (int)total);
     printf("  %-35s max_abs_error = %.6e  %s\n", name, err, err < 3e-3 ? "PASS" : "FAIL");
@@ -135,7 +129,7 @@ int main(int argc, char** argv) {
     int d = 64;
     bool causal = true;
     check_supported_head_dim(d);
-    print_project_precision_summary(d);
+    print_precision_summary(d);
     printf("\n");
 
     std::vector<int> seq_lens = {128, 256, 512, 1024, 2048, 4096};
@@ -150,12 +144,11 @@ int main(int argc, char** argv) {
 
     struct MethodEntry {
         const char* name;
-        ProjectKernelFn fn;
+        KernelFn fn;
     };
 
     MethodEntry methods[] = {
         {"Simplified FA1", flash_attention_v1},
-        {"FA2-inspired extension", flash_attention_v2},
         {"Ablation: no tensor cores", flash_attention_v1_no_tensor_cores},
         {"Ablation: no vectorized loads", flash_attention_v1_no_vectorized_loads},
         {"Ablation: no online softmax", flash_attention_v1_no_online_softmax},
@@ -164,7 +157,7 @@ int main(int argc, char** argv) {
 
     for (int N : seq_lens) {
         printf("--- N = %d (B=%d, H=%d, d=%d, causal=%d) ---\n", N, B, H, d, causal);
-        project_cuda_memory_tracking_clear();
+        cuda_memory_tracking_clear();
 
         size_t total = (size_t)B * H * N * d;
         size_t input_bytes = total * sizeof(project_in_t);
@@ -178,9 +171,9 @@ int main(int argc, char** argv) {
         fill_random(h_Kf.data(), total);
         fill_random(h_Vf.data(), total);
 
-        convert_float_to_project_input(h_Qf.data(), h_Q.data(), (int)total);
-        convert_float_to_project_input(h_Kf.data(), h_K.data(), (int)total);
-        convert_float_to_project_input(h_Vf.data(), h_V.data(), (int)total);
+        convert_float_to_input(h_Qf.data(), h_Q.data(), (int)total);
+        convert_float_to_input(h_Kf.data(), h_K.data(), (int)total);
+        convert_float_to_input(h_Vf.data(), h_V.data(), (int)total);
 
         float scale = 1.0f / sqrtf((float)d);
         reference_attention_host(
@@ -227,7 +220,7 @@ int main(int argc, char** argv) {
             CUDA_CHECK(cudaMemcpy(
                 h_O_raw.data(), d_O, output_bytes, cudaMemcpyDeviceToHost
             ));
-            convert_project_output_to_float(h_O_raw.data(), h_O.data(), (int)total);
+            convert_output_to_float(h_O_raw.data(), h_O.data(), (int)total);
             float err = max_abs_diff(h_ref.data(), h_O.data(), (int)total);
 
             printf("  %-35s %8.3f ms  mem=%zu bytes  err=%.2e\n",
@@ -245,7 +238,7 @@ int main(int argc, char** argv) {
     }
 
     fclose(csv);
-    printf("Project kernel results written to results/benchmark_results.csv\n");
+    printf("Kernel results written to results/benchmark_results.csv\n");
     printf("Run python/benchmark_official_flash_attn.py for the shared PyTorch baseline, FA1, and FA2,\n");
     printf("then run python/run_benchmarks.py to merge all results.\n");
 

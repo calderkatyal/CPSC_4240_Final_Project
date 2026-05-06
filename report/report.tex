@@ -83,7 +83,11 @@ The key algebraic trick behind FlashAttention-1 is that softmax normalization ca
 The same rescaling factor $e^{m - m'}$ can be applied to the running output accumulator before adding the new tile's contribution. This recurrence is what lets FlashAttention remain exact while discarding the old score tile once its contribution has been folded into the running state \citep{dao2022flashattention}. In other words, the algorithm reduces the memory footprint by changing the order of computation, not by changing the mathematical attention rule.
 
 \subsection{Evolution from FlashAttention-1 to FlashAttention-4}
-The FlashAttention family has evolved in a way that is useful for framing our project. FA1 contributes the core IO-aware exact-attention reformulation. FA2 improves forward performance through better work partitioning and reduced overhead beyond raw matrix multiplication \citep{dao2023flashattention2}. FA3 is much more architecture-specific: its key contributions are asynchronous execution, warp specialization, and deeper co-design with Hopper hardware \citep{shah2024flashattention3}. FA4 pushes this hardware/software co-design further for asymmetric scaling on newer systems, emphasizing redesigned fully asynchronous MMA pipelines, larger tiles, and reduced non-matmul bottlenecks such as exponential evaluation \citep{zadouri2026flashattention4}. These later versions are important context for understanding the trajectory of the family, even though our implementation target remains a compact FA1-centered kernel.
+FlashAttention-2 extends the original IO-aware design with stronger forward-pass work partitioning and lower non-matmul overhead \citep{dao2023flashattention2}. In practice, FA2 is important because it shows that once the core FA1 reformulation is in place, the next major speed gains come from reorganizing how thread blocks and warps share attention work rather than from changing the exact attention rule itself.
+
+FlashAttention-3 is a more architecture-specific step focused on Hopper GPUs \citep{shah2024flashattention3}. Its main ideas are asynchronous execution, warp specialization, and more aggressive use of low-precision hardware features, so it represents a deeper kernel--hardware co-design effort than either FA1 or FA2.
+
+FlashAttention-4 pushes that co-design approach further for newer systems \citep{zadouri2026flashattention4}. Its emphasis is on larger-scale pipeline redesign, more asynchronous MMA overlap, and reducing remaining non-matmul bottlenecks such as exponential evaluation, which places it well beyond the scope of a compact educational CUDA kernel.
 
 This scoping decision matches our experimental goal. We are not training models, so we prioritize the features that most strongly affect forward-pass performance:
 \begin{itemize}
@@ -175,24 +179,6 @@ Our kernel is intentionally smaller than the official implementation, but it pre
     \label{fig:tile_flow}
 \end{figure}
 
-\begin{figure}[H]
-    \centering
-    \fbox{
-        \parbox{0.94\linewidth}{
-            \centering
-            \small
-            \textbf{Kernel Flow Used in This Project}\\[4pt]
-            \fbox{\parbox{0.19\linewidth}{\centering PyTorch baseline\\Materialize $QK^\top$}} \hfill
-            $\Longrightarrow$ \hfill
-            \fbox{\parbox{0.22\linewidth}{\centering Simplified FA1\\Block + online softmax}} \hfill
-            $\Longrightarrow$ \hfill
-            \fbox{\parbox{0.25\linewidth}{\centering FA2-inspired extension\\Wider CTA query ownership}}
-        }
-    }
-    \caption{Conceptual progression of the main benchmarked methods. Both compute exact causal attention, but they differ in how work and memory movement are organized.}
-    \label{fig:method_progression}
-\end{figure}
-
 \subsection{Ablations}
 We include four ablation kernels so that the report can answer which FA1 ingredients matter most.
 \begin{itemize}
@@ -214,7 +200,6 @@ The ablations are important because they let us isolate whether the main gain co
         \midrule
         PyTorch baseline & Standard eager attention decomposition & yes & What is the baseline cost when the score matrix is fully materialized? \\
         Simplified FA1 & Tiling + online softmax + fusion & yes & How much of the main FlashAttention behavior appears once the core FA1 ideas are implemented? \\
-        FA2-inspired extension & Broader CTA work partitioning & yes & How much extra speed is recovered by letting each CTA amortize K/V work across more query rows? \\
         Ablations & Removal of one FA1 ingredient at a time & yes & Which FA1 ingredients are actually carrying the performance gain? \\
         \bottomrule
     \end{tabular}
@@ -223,12 +208,10 @@ The ablations are important because they let us isolate whether the main gain co
 \subsection{Implementation details relevant to the GPU study}
 Two implementation choices are especially important for interpreting the benchmark. First, all project kernels use FP16 inputs and FP32 accumulation. This keeps the benchmark aligned with the mixed-precision regime used by modern FlashAttention implementations while avoiding the additional complexity of BF16 support in our student codebase. Second, the head dimension is fixed to $d=64$ for the main benchmark sweep. This is small enough to be common in practice and is one of the common compile-time specializations we keep in the simplified code path, namely $\{32, 64, 128\}$.
 
-The FA2-inspired project kernel now follows a narrower but more faithful interpretation of the FA2 paper. Instead of using a separate split/combine path, it keeps the same exact forward math as simplified FA1 but gives each CTA ownership of a wider query block. This better matches FA2's emphasis on improved work partitioning and lower fixed overhead per useful row, while still keeping the code compact \citep{dao2023flashattention2}.
-
 To stay close to the official FlashAttention-1 source without making the codebase explode in size, the main FA1 path also adopts several low-level choices from upstream: compile-time dispatch for supported head dimensions, 16-byte vectorized tile loads for $Q/K/V$, shared-memory staging for both the key and value tiles, and the $\exp_2$ / $\log_2 e$ softmax scaling path used by the native kernel. These are all symmetry-preserving implementation choices rather than benchmark hacks: they apply equally across sequence lengths and do not change the exact attention computation.
 
 \subsection{Kernel layout}
-Our CUDA implementation uses $16 \times 16$ WMMA fragments, but the full thread-block work unit is larger: the simplified FA1 kernel processes a $64$-row query block, while the FA2-inspired extension doubles that CTA query ownership to $128$ rows for the smaller supported head dimensions. The simplified kernel keeps a fixed $128$-row KV tile, which is large enough to reuse each staged block across several WMMA score tiles without introducing the heavier register footprint of the production kernel. The query block and the current KV working set are staged on chip, and each active query row maintains its running maximum, running normalization constant, and running output vector in FP32 across KV-block iterations. Once all KV blocks have been processed, the output accumulator is normalized and written back to global memory.
+Our CUDA implementation uses $16 \times 16$ WMMA fragments, but the full thread-block work unit is larger: the simplified FA1 kernel processes a $64$-row query block while keeping a fixed $128$-row KV tile. The tile is large enough to reuse each staged block across several WMMA score tiles without introducing the heavier register footprint of the production kernel. The query block and the current KV working set are staged on chip, and each active query row maintains its running maximum, running normalization constant, and running output vector in FP32 across KV-block iterations. Once all KV blocks have been processed, the output accumulator is normalized and written back to global memory.
 
 Figure~\ref{fig:hbm_sram_map} makes the memory-hierarchy mapping explicit: HBM stores the full $Q$, $K$, $V$, and $O$ tensors, while SRAM and other on-chip state hold only the current query tile, the current K/V tile, and the row-wise running state needed for exact online softmax. The full $N \times N$ score matrix is never materialized.
 
@@ -287,7 +270,6 @@ Figure~\ref{fig:hbm_sram_map} makes the memory-hierarchy mapping explicit: HBM s
         \midrule
         PyTorch baseline & yes & yes & yes & yes & no \\
         Simplified FA1 & yes & yes & yes & yes & yes \\
-        FA2-inspired extension & yes & yes & yes & yes & yes \\
         No tensor cores & yes & yes & yes & yes & no \\
         No vectorized loads & yes & yes & yes & yes & yes \\
         No online softmax & yes & yes & yes & yes & yes \\
@@ -323,8 +305,7 @@ The benchmark uses one fixed batch/head configuration and varies only sequence l
 The evaluation reports three classes of comparisons.
 \begin{enumerate}
     \item \textbf{PyTorch baseline vs.\ simplified FA1.} This isolates the main FlashAttention-1 design choices inside the project CUDA kernels.
-    \item \textbf{Simplified FA1 vs.\ FA2-inspired extension.} This isolates the effect of broader CTA work partitioning without changing the exact forward-pass math.
-    \item \textbf{Project kernels vs.\ official FlashAttention-1 and FlashAttention-2.} This measures the gap between the educational implementation and the production kernels from both generations.
+    \item \textbf{Project kernel vs.\ official FlashAttention-1 and FlashAttention-2.} This measures the gap between the educational implementation and the production kernels from both generations.
     \item \textbf{FA1 ablations.} These isolate which of the core FA1 ingredients are most important in practice.
 \end{enumerate}
 
@@ -402,7 +383,7 @@ The official baselines serve two distinct roles in this study. Official FlashAtt
 Taken together, Figure~\ref{fig:gpuplots} and Tables~\ref{tab:runtime}--\ref{tab:ablation} answer complementary questions. The runtime table gives the most direct method-to-method comparison at representative sequence lengths, the speedup table makes the effect of the FA1 core easier to read relative to a shared PyTorch attention baseline, and the ablation table identifies which FA1 ingredients matter most once the benchmark moves into the long-sequence regime.
 
 \section{Discussion}
-The evaluation is organized so that each comparison answers a specific systems question. The most important project-side comparison is the shared PyTorch baseline versus simplified FA1, since that isolates the practical effect of IO-aware tiling, online softmax, and score-matrix elimination in our compact kernel. The second project-side comparison is simplified FA1 versus the FA2-inspired extension, since that isolates the effect of broader CTA work partitioning while holding the exact forward computation fixed. The official FA1 and FA2 baselines then locate the remaining gap between the concise educational kernel and production implementations. For the merged speedup summaries, all methods are normalized against the same PyTorch attention baseline so that the official kernels and the project kernels share one common reference point.
+The evaluation is organized so that each comparison answers a specific systems question. The most important project-side comparison is the shared PyTorch baseline versus simplified FA1, since that isolates the practical effect of IO-aware tiling, online softmax, and score-matrix elimination in our compact kernel. The official FA1 and FA2 baselines then locate the remaining gap between the concise educational kernel and production implementations. For the merged speedup summaries, all methods are normalized against the same PyTorch attention baseline so that the official kernels and the project kernels share one common reference point.
 
 \section{Limitations}
 This project still has several deliberate limitations, all of which should be acknowledged in the final presentation of results.

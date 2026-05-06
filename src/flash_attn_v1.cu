@@ -1,4 +1,4 @@
-// Simplified FA1-style forward kernel.
+// FA1-style forward kernel.
 //
 // Core ideas represented here:
 //   1. Shared-memory tiling for Q/K/V state

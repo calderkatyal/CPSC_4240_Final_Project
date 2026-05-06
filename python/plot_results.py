@@ -1,8 +1,8 @@
 """
-Generate GPU benchmark plots for the simplified FlashAttention project.
+Generate GPU benchmark plots for the local FA1 kernel suite.
 
 The script plots:
-  - project GPU kernels from `results/benchmark_results.csv`
+  - local kernel results from `results/benchmark_results.csv`
   - merged comparison data from `results/gpu_comparison_results.csv` when available
 """
 
@@ -24,7 +24,6 @@ SPEEDUP_BASELINE = "PyTorch attention baseline (fp16)"
 COLORS = {
     SPEEDUP_BASELINE: "#ff7f0e",
     "Simplified FA1": "#1f77b4",
-    "FA2-inspired extension": "#2ca02c",
     "Official FlashAttention-1 (fp16)": "#9467bd",
     "Official FlashAttention-2 (fp16)": "#8c564b",
     "Ablation: no tensor cores": "#d62728",
@@ -36,7 +35,6 @@ COLORS = {
 MARKERS = {
     SPEEDUP_BASELINE: "D",
     "Simplified FA1": "o",
-    "FA2-inspired extension": "^",
     "Official FlashAttention-1 (fp16)": "P",
     "Official FlashAttention-2 (fp16)": "X",
     "Ablation: no tensor cores": "s",
@@ -92,7 +90,6 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
     priority = [
         SPEEDUP_BASELINE,
         "Simplified FA1",
-        "FA2-inspired extension",
         "Official FlashAttention-1 (fp16)",
         "Official FlashAttention-2 (fp16)",
     ]
@@ -222,7 +219,7 @@ def generate_from_csv(path: Path, label: str, prefix: str) -> None:
 def main() -> None:
     generated_any = False
     specs = [
-        ("benchmark_results.csv", "Project GPU kernels", "project_gpu"),
+        ("benchmark_results.csv", "Local FA1 kernels", "project_gpu"),
         ("gpu_comparison_results.csv", "GPU comparison", "gpu_comparison"),
     ]
     for csv_name, label, prefix in specs:

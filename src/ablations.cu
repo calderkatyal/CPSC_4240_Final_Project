@@ -1,4 +1,4 @@
-// Ablation variants for the simplified FlashAttention project.
+// Ablation variants for the FA1 kernel.
 //
 // These isolate key ideas from the main FA1-style kernel:
 //   1. No online softmax: keep the same tiled WMMA score/value path, but use

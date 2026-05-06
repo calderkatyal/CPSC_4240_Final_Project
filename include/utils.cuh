@@ -9,7 +9,6 @@
 #include <cfloat>
 #include <cstddef>
 #include <unordered_map>
-#include <vector>
 
 #define CUDA_CHECK(call)                                                       \
     do {                                                                        \
@@ -23,52 +22,52 @@
 
 __host__ __device__ inline int cdiv(int a, int b) { return (a + b - 1) / b; }
 
-inline std::unordered_map<void*, size_t>& project_cuda_allocations() {
+inline std::unordered_map<void*, size_t>& cuda_allocations() {
     static std::unordered_map<void*, size_t> allocations;
     return allocations;
 }
 
-inline size_t& project_cuda_current_bytes() {
+inline size_t& cuda_current_bytes() {
     static size_t current = 0;
     return current;
 }
 
-inline size_t& project_cuda_peak_bytes() {
+inline size_t& cuda_peak_bytes() {
     static size_t peak = 0;
     return peak;
 }
 
-inline void project_cuda_memory_tracking_clear() {
-    project_cuda_allocations().clear();
-    project_cuda_current_bytes() = 0;
-    project_cuda_peak_bytes() = 0;
+inline void cuda_memory_tracking_clear() {
+    cuda_allocations().clear();
+    cuda_current_bytes() = 0;
+    cuda_peak_bytes() = 0;
 }
 
-inline void project_cuda_memory_tracking_reset_peak() {
-    project_cuda_peak_bytes() = project_cuda_current_bytes();
+inline void cuda_memory_tracking_reset_peak() {
+    cuda_peak_bytes() = cuda_current_bytes();
 }
 
-inline size_t project_cuda_memory_tracking_peak_bytes() {
-    return project_cuda_peak_bytes();
+inline size_t cuda_memory_tracking_peak_bytes() {
+    return cuda_peak_bytes();
 }
 
 inline cudaError_t tracked_cuda_malloc(void** ptr, size_t size) {
     cudaError_t err = cudaMalloc(ptr, size);
     if (err == cudaSuccess && ptr != nullptr && *ptr != nullptr) {
-        project_cuda_allocations()[*ptr] = size;
-        project_cuda_current_bytes() += size;
-        if (project_cuda_current_bytes() > project_cuda_peak_bytes()) {
-            project_cuda_peak_bytes() = project_cuda_current_bytes();
+        cuda_allocations()[*ptr] = size;
+        cuda_current_bytes() += size;
+        if (cuda_current_bytes() > cuda_peak_bytes()) {
+            cuda_peak_bytes() = cuda_current_bytes();
         }
     }
     return err;
 }
 
 inline cudaError_t tracked_cuda_free(void* ptr) {
-    auto& allocations = project_cuda_allocations();
+    auto& allocations = cuda_allocations();
     auto it = allocations.find(ptr);
     if (it != allocations.end()) {
-        project_cuda_current_bytes() -= it->second;
+        cuda_current_bytes() -= it->second;
         allocations.erase(it);
     }
     return cudaFree(ptr);
@@ -87,16 +86,15 @@ constexpr int PROJECT_THREADS = PROJECT_WARP_SIZE * PROJECT_Q_WARPS;
 constexpr int PROJECT_MAX_D = 128;
 constexpr float PROJECT_LOG2E = 1.4426950408889634f;
 
-inline bool project_is_supported_head_dim(int d) {
+inline bool is_supported_head_dim(int d) {
     return d == 32 || d == 64 || d == 128;
 }
 
 inline void check_supported_head_dim(int d) {
-    if (!project_is_supported_head_dim(d)) {
+    if (!is_supported_head_dim(d)) {
         fprintf(stderr,
-                "Unsupported head dimension d=%d. This simplified project "
-                "currently specializes the common tensor-core-friendly head "
-                "dimensions {32, 64, 128}.\n",
+                "Unsupported head dimension d=%d. Supported specializations "
+                "are {32, 64, 128}.\n",
                 d);
         exit(EXIT_FAILURE);
     }
@@ -105,14 +103,14 @@ inline void check_supported_head_dim(int d) {
 inline void check_tensor_core_capability(const cudaDeviceProp& prop) {
     if (prop.major < 7) {
         fprintf(stderr,
-                "This project's CUDA kernels require Volta-or-newer tensor "
-                "cores (compute capability >= 7.0). Detected %d.%d.\n",
+                "These kernels require Volta-or-newer tensor cores "
+                "(compute capability >= 7.0). Detected %d.%d.\n",
                 prop.major, prop.minor);
         exit(EXIT_FAILURE);
     }
 }
 
-inline void convert_float_to_project_input(
+inline void convert_float_to_input(
     const float* src, project_in_t* dst, int n
 ) {
     for (int i = 0; i < n; i++) {
@@ -120,76 +118,20 @@ inline void convert_float_to_project_input(
     }
 }
 
-inline void print_project_precision_summary(int d) {
-    printf("Project kernel precision: FP16 Q/K/V/O tensors, FP32 softmax/output accumulators\n");
+inline void print_precision_summary(int d) {
+    printf("Kernel precision: FP16 Q/K/V/O tensors, FP32 softmax/output accumulators\n");
     printf("Tensor-core score path: enabled for supported head dims {32, 64, 128}; current d=%d\n", d);
-    printf("Simplified FA1 thread-block tiles: Q-block=%d rows, KV-block=%d rows\n",
+    printf("FA1 thread-block tiles: Q-block=%d rows, KV-block=%d rows\n",
            PROJECT_BLOCK_M, PROJECT_BLOCK_N);
-    printf("FA2-inspired extension: split-KV sequence parallelism whenever more than one KV tile exists\n");
 }
 
-inline void convert_project_output_to_float(
+inline void convert_output_to_float(
     const project_out_t* src, float* dst, int n
 ) {
     for (int i = 0; i < n; i++) {
         dst[i] = __half2float(src[i]);
     }
 }
-
-inline int project_num_splits_heuristic(
-    int batch_nheads_mblocks, int effective_sms, int num_n_blocks, int max_splits
-) {
-    if (batch_nheads_mblocks >= static_cast<int>(0.8f * effective_sms)) {
-        return 1;
-    }
-    if (max_splits > effective_sms) {
-        max_splits = effective_sms;
-    }
-    if (max_splits > num_n_blocks) {
-        max_splits = num_n_blocks;
-    }
-    float max_efficiency = 0.0f;
-    std::vector<float> efficiency;
-    efficiency.reserve(max_splits);
-    auto ceildiv_host = [](int a, int b) { return (a + b - 1) / b; };
-    auto is_split_eligible = [&](int num_splits) {
-        return num_splits == 1
-            || ceildiv_host(num_n_blocks, num_splits)
-                != ceildiv_host(num_n_blocks, num_splits - 1);
-    };
-
-    for (int num_splits = 1; num_splits <= max_splits; num_splits++) {
-        if (!is_split_eligible(num_splits)) {
-            efficiency.push_back(0.0f);
-        } else {
-            float n_waves = float(batch_nheads_mblocks * num_splits) / float(effective_sms);
-            float eff = n_waves / ceilf(n_waves);
-            if (eff > max_efficiency) {
-                max_efficiency = eff;
-            }
-            efficiency.push_back(eff);
-        }
-    }
-
-    for (int num_splits = 1; num_splits <= max_splits; num_splits++) {
-        if (!is_split_eligible(num_splits)) {
-            continue;
-        }
-        if (efficiency[num_splits - 1] >= 0.85f * max_efficiency) {
-            return num_splits;
-        }
-    }
-    return 1;
-}
-
-struct AttentionParams {
-    int batch_size;
-    int num_heads;
-    int seq_len;
-    int head_dim;
-    float scale;
-    bool causal;
-};
 
 inline void fill_random(float* data, int n) {
     for (int i = 0; i < n; i++) {
