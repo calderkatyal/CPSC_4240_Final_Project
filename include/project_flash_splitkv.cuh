@@ -485,7 +485,7 @@ inline void launch_flash_attention_splitkv_hdim(
     int num_splits = choose_splitkv_splits<HEAD_DIM>(B, H, N, partial_smem);
     if (num_splits <= 1) {
         release_splitkv_workspace();
-        launch_flash_attention_core_hdim<HEAD_DIM, true>(
+        launch_flash_attention_core_hdim<HEAD_DIM, PROJECT_Q_WARPS, PROJECT_BLOCK_N, true>(
             d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
         );
         return;
