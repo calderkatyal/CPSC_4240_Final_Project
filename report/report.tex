@@ -198,10 +198,10 @@ We include four ablation kernels so that the report can answer which FA1 ingredi
 \begin{itemize}
     \item \textbf{No tensor cores.} This kernel keeps the same staged query/KV tiles, online-softmax recurrence, and fused forward pass, but replaces the WMMA score/output updates with scalar per-thread math.
     \item \textbf{No vectorized loads.} This kernel keeps the same FA1 core algorithm, but disables the 16-byte Q/K/V tile loads used by the main path.
-    \item \textbf{No online softmax.} This kernel keeps the same block structure, staged query/KV blocks, and tensor-core score subtiles, but replaces the online recurrence with a two-pass computation.
-    \item \textbf{No SRAM tiling.} This kernel keeps the same outer block structure and exact online-softmax logic, but loads key/value rows directly from global memory instead of staging K/V blocks in shared memory. In our compact codebase this is the broadest structural ablation, since removing the staged K/V tile also removes the convenient tensor-core score path.
+    \item \textbf{No online softmax.} This kernel keeps the same staged query/KV blocks, vectorized tile movement, tensor-core score path, and WMMA value-update path, but replaces the online recurrence with a two-pass computation over precomputed row maxima.
+    \item \textbf{No SRAM tiling.} This kernel keeps the same outer block structure, tensor-core score path, WMMA value-update path, and exact online-softmax logic, but fetches K/V MMA microtiles directly from global memory instead of staging K/V blocks in shared memory.
 \end{itemize}
-The ablations are important because they let us isolate whether the main gain comes from tensor-core math, vectorized tile movement, the online recurrence, or the memory-hierarchy reorganization. The tensor-core and vectorized-load ablations still preserve much of the fused IO-aware structure and can remain competitive with eager PyTorch, while the latter two intentionally remove the dominant memory-saving ingredients and can legitimately fall below the eager baseline.
+The ablations are important because they let us isolate whether the main gain comes from tensor-core math, vectorized tile movement, the online recurrence, or the memory-hierarchy reorganization. The tensor-core and vectorized-load ablations still preserve much of the fused IO-aware structure and can remain competitive with eager PyTorch, while the latter two intentionally remove the dominant algorithmic and memory-hierarchy advantages and can legitimately fall below the eager baseline even as pure single-factor ablations.
 
 \begin{table}[H]
     \centering
