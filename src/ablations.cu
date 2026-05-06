@@ -604,26 +604,11 @@ void launch_no_tensor_cores(
 ) {
     const float scale_l2 = scale * PROJECT_LOG2E;
     switch (d) {
-        case 16:
-            launch_no_tensor_cores_hdim<16>(d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal);
-            break;
         case 32:
             launch_no_tensor_cores_hdim<32>(d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal);
             break;
-        case 48:
-            launch_no_tensor_cores_hdim<48>(d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal);
-            break;
         case 64:
             launch_no_tensor_cores_hdim<64>(d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal);
-            break;
-        case 80:
-            launch_no_tensor_cores_hdim<80>(d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal);
-            break;
-        case 96:
-            launch_no_tensor_cores_hdim<96>(d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal);
-            break;
-        case 112:
-            launch_no_tensor_cores_hdim<112>(d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal);
             break;
         case 128:
             launch_no_tensor_cores_hdim<128>(d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal);

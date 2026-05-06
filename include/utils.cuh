@@ -87,13 +87,17 @@ constexpr int PROJECT_THREADS = PROJECT_WARP_SIZE * PROJECT_Q_WARPS;
 constexpr int PROJECT_MAX_D = 128;
 constexpr float PROJECT_LOG2E = 1.4426950408889634f;
 
+inline bool project_is_supported_head_dim(int d) {
+    return d == 32 || d == 64 || d == 128;
+}
+
 inline void check_supported_head_dim(int d) {
-    if (d <= 0 || d > PROJECT_MAX_D || (d % PROJECT_TILE) != 0) {
+    if (!project_is_supported_head_dim(d)) {
         fprintf(stderr,
                 "Unsupported head dimension d=%d. This simplified project "
-                "supports tensor-core-friendly head dimensions that are "
-                "multiples of %d with d <= %d.\n",
-                d, PROJECT_TILE, PROJECT_MAX_D);
+                "currently specializes the common tensor-core-friendly head "
+                "dimensions {32, 64, 128}.\n",
+                d);
         exit(EXIT_FAILURE);
     }
 }
@@ -118,7 +122,7 @@ inline void convert_float_to_project_input(
 
 inline void print_project_precision_summary(int d) {
     printf("Project kernel precision: FP16 Q/K/V inputs, FP32 softmax/output accumulation\n");
-    printf("Tensor-core score path: enabled for d=%d (multiple of %d)\n", d, PROJECT_TILE);
+    printf("Tensor-core score path: enabled for supported head dims {32, 64, 128}; current d=%d\n", d);
     printf("Thread-block tile sizes: Q-block=%d rows, KV-block=%d rows\n",
            PROJECT_BLOCK_M, PROJECT_BLOCK_N);
 }

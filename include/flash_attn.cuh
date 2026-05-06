@@ -7,7 +7,7 @@
 // official FlashAttention codebase:
 //   - dense self-attention only
 //   - FP16 Q/K/V inputs with FP32 softmax and output accumulation
-//   - tensor-core-assisted score tiles for d that is a multiple of 16
+//   - tensor-core-assisted score tiles for common head dims {32, 64, 128}
 //   - no backward pass / dropout / varlen / MQA-GQA / KV cache
 //   - no Hopper-specific TMA / warp-specialized / FP8 kernels
 

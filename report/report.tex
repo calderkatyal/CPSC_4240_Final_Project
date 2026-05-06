@@ -234,7 +234,7 @@ The ablations are important because they let us isolate whether the main gain co
 The FA2-style idea we chose is split-KV sequence parallelism. This choice is deliberate: it is a real forward-only mechanism from the FlashAttention codebase, it is important enough to matter for performance, and it can be isolated cleanly in a student implementation. In contrast, many of the other FA2 improvements are more entangled with larger kernel-engineering changes. Split-KV therefore gives us the best tradeoff between faithfulness to the official implementation and interpretability in the final benchmark.
 
 \subsection{Implementation details relevant to the GPU study}
-Two implementation choices are especially important for interpreting the benchmark. First, all project kernels use FP16 inputs and FP32 accumulation. This keeps the benchmark aligned with the mixed-precision regime used by modern FlashAttention implementations while avoiding the additional complexity of BF16 support in our student codebase. Second, the head dimension is fixed to $d=64$ for the main benchmark sweep. This is small enough to be common in practice, but also aligned with our WMMA score path and with the tensor-core-friendly restriction that $d$ be a multiple of 16.
+Two implementation choices are especially important for interpreting the benchmark. First, all project kernels use FP16 inputs and FP32 accumulation. This keeps the benchmark aligned with the mixed-precision regime used by modern FlashAttention implementations while avoiding the additional complexity of BF16 support in our student codebase. Second, the head dimension is fixed to $d=64$ for the main benchmark sweep. This is small enough to be common in practice and is one of the common compile-time specializations we keep in the simplified code path, namely $\{32, 64, 128\}$.
 
 The simplified FA1 kernel and the FA2-inspired kernel also share most of the same surrounding choices: both perform exact causal attention, both keep the output accumulation in FP32, and both use the same correctness reference in the benchmark binary. This is important because it means the FA1-versus-FA2 comparison is not confounded by datatype changes, approximation, or a different masking convention. The intended interpretation is therefore narrow and clean: if FA2-inspired split-KV helps, it should help because of additional sequence-level parallelism and altered work partitioning, not because the kernels are doing different mathematical tasks.
 
@@ -423,7 +423,7 @@ The evaluation is organized so that each comparison answers a specific systems q
 This project still has several deliberate limitations, all of which should be acknowledged in the final presentation of results.
 \begin{itemize}
     \item The code is forward-only and does not include training kernels.
-    \item The kernels currently target head dimensions that are multiples of 16 and at most 128.
+    \item The kernels currently specialize the common head dimensions $\{32, 64, 128\}$ rather than the full set of multiples of $16$.
     \item The implementation uses FP16 inputs and FP32 accumulation, but does not yet support BF16.
     \item The FA2-inspired addition is intentionally narrow and should not be presented as a full reproduction of FA2.
     \item The comparison against the official FA1 and FA2 packages is numerically meaningful and practically useful, but it is not an apples-to-apples feature comparison.

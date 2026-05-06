@@ -1,11 +1,10 @@
 NVCC = nvcc
 NVCC_FLAGS = -O3 --use_fast_math -std=c++17 -I include
-ARCH_FLAGS = -gencode arch=compute_70,code=sm_70 \
-             -gencode arch=compute_75,code=sm_75 \
-             -gencode arch=compute_80,code=sm_80 \
-             -gencode arch=compute_86,code=sm_86 \
-             -gencode arch=compute_89,code=sm_89 \
-             -gencode arch=compute_90,code=sm_90
+
+# Keep the default build fast for the target GPU used in this project.
+# Override, e.g. `make benchmark CUDA_ARCHS="80 89"` if you want a wider fatbin.
+CUDA_ARCHS ?= 89
+ARCH_FLAGS = $(foreach arch,$(CUDA_ARCHS),-gencode arch=compute_$(arch),code=sm_$(arch))
 
 SOURCES = src/flash_attn_v1.cu src/flash_attn_v2.cu src/ablations.cu src/benchmark.cu
 

@@ -21,8 +21,6 @@ static __global__ void flash_attention_splitkv_partial_kernel(
     constexpr int num_o_frags = HEAD_DIM / PROJECT_TILE;
     constexpr int d_padded = HEAD_DIM + SMEM_PAD;
     constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-    constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
-    constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
 
     const int batch_head = blockIdx.z;
     const int split_idx  = blockIdx.y;
@@ -436,38 +434,13 @@ inline void launch_flash_attention_splitkv(
     check_supported_head_dim(d);
     const float scale_l2 = scale * PROJECT_LOG2E;
     switch (d) {
-        case 16:
-            launch_flash_attention_splitkv_hdim<16>(
-                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-            );
-            break;
         case 32:
             launch_flash_attention_splitkv_hdim<32>(
                 d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
             );
             break;
-        case 48:
-            launch_flash_attention_splitkv_hdim<48>(
-                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-            );
-            break;
         case 64:
             launch_flash_attention_splitkv_hdim<64>(
-                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-            );
-            break;
-        case 80:
-            launch_flash_attention_splitkv_hdim<80>(
-                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-            );
-            break;
-        case 96:
-            launch_flash_attention_splitkv_hdim<96>(
-                d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
-            );
-            break;
-        case 112:
-            launch_flash_attention_splitkv_hdim<112>(
                 d_Q, d_K, d_V, d_O, B, H, N, scale_l2, causal
             );
             break;
