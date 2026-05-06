@@ -14,6 +14,13 @@ namespace wmma = nvcuda::wmma;
 // worst shared-memory bank-alignment pattern.
 constexpr int SMEM_PAD = 8;
 
+template<int D_PADDED, int BN_PADDED>
+__host__ __device__ constexpr int shared_kv_buffer_elems() {
+    constexpr int kv_tile_elems = PROJECT_BLOCK_N * D_PADDED;
+    constexpr int p_tile_elems = PROJECT_BLOCK_M * BN_PADDED;
+    return kv_tile_elems > p_tile_elems ? kv_tile_elems : p_tile_elems;
+}
+
 // ---- Legacy helpers used by ablation kernels (unpadded strides) --------
 
 __device__ inline void load_kv_block(
@@ -438,8 +445,7 @@ inline void launch_flash_attention_core_hdim(
 ) {
     constexpr int d_padded = HEAD_DIM + SMEM_PAD;
     constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-    constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
-    constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
+    constexpr int kv_buf_elems = shared_kv_buffer_elems<d_padded, bn_padded>();
 
     const int BH = B * H;
     const int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);

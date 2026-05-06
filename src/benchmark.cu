@@ -2,7 +2,6 @@
 //
 // This benchmark exercises:
 //   - a simplified FA1-style kernel with tensor-core score tiles
-//   - a later-version split-KV sequence-parallel extension
 //   - FA1 ablations for tensor cores, vectorized loads, online softmax,
 //     and SRAM tiling
 //
@@ -12,8 +11,6 @@
 // across all merged comparisons.
 
 #include "flash_attn.cuh"
-#include "project_flash_splitkv.cuh"
-
 #include <algorithm>
 #include <filesystem>
 #include <string>
@@ -23,8 +20,6 @@ using ProjectKernelFn = void (*)(
     const project_in_t*, const project_in_t*, const project_in_t*, project_out_t*,
     int, int, int, int, float, bool
 );
-using ProjectPrepareFn = void (*)(int, int, int, int);
-using ProjectCleanupFn = void (*)();
 
 float benchmark_kernel(
     ProjectKernelFn fn,
@@ -152,18 +147,14 @@ int main(int argc, char** argv) {
     struct MethodEntry {
         const char* name;
         ProjectKernelFn fn;
-        ProjectPrepareFn prepare;
-        ProjectCleanupFn cleanup;
     };
 
     MethodEntry methods[] = {
-        {"Simplified FA1", flash_attention_v1, nullptr, nullptr},
-        {"Split-KV extension", flash_attention_v2, flash_attention_v2_prepare,
-         flash_attention_v2_release_workspace},
-        {"Ablation: no tensor cores", flash_attention_v1_no_tensor_cores, nullptr, nullptr},
-        {"Ablation: no vectorized loads", flash_attention_v1_no_vectorized_loads, nullptr, nullptr},
-        {"Ablation: no online softmax", flash_attention_v1_no_online_softmax, nullptr, nullptr},
-        {"Ablation: no SRAM tiling", flash_attention_v1_no_tiling, nullptr, nullptr},
+        {"Simplified FA1", flash_attention_v1},
+        {"Ablation: no tensor cores", flash_attention_v1_no_tensor_cores},
+        {"Ablation: no vectorized loads", flash_attention_v1_no_vectorized_loads},
+        {"Ablation: no online softmax", flash_attention_v1_no_online_softmax},
+        {"Ablation: no SRAM tiling", flash_attention_v1_no_tiling},
     };
 
     for (int N : seq_lens) {
@@ -208,23 +199,14 @@ int main(int argc, char** argv) {
 
         printf("Correctness checks:\n");
         for (const auto& method : methods) {
-            if (method.prepare != nullptr) {
-                method.prepare(B, H, N, d);
-            }
             run_correctness_check(
                 method.name, method.fn, h_ref.data(),
                 d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
             );
-            if (method.cleanup != nullptr) {
-                method.cleanup();
-            }
         }
 
         printf("Benchmarks:\n");
         for (const auto& method : methods) {
-            if (method.prepare != nullptr) {
-                method.prepare(B, H, N, d);
-            }
             size_t mem = measure_kernel_peak_memory(
                 method.fn, d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
             );
@@ -243,9 +225,6 @@ int main(int argc, char** argv) {
                    method.name, ms, mem, err);
             fprintf(csv, "%s,%d,%.4f,%zu,%.6e,%d\n",
                     method.name, N, ms, mem, err, causal);
-            if (method.cleanup != nullptr) {
-                method.cleanup();
-            }
         }
 
         printf("\n");

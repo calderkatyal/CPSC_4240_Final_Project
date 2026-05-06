@@ -27,16 +27,3 @@ void flash_attention_v2(
         d_Q, d_K, d_V, d_O, B, H, N, d, scale, causal
     );
 }
-
-void flash_attention_v2_prepare(
-    int B,
-    int H,
-    int N,
-    int d
-) {
-    project_flash::prepare_flash_attention_splitkv_workspace(B, H, N, d);
-}
-
-void flash_attention_v2_release_workspace() {
-    project_flash::release_flash_attention_splitkv_workspace();
-}

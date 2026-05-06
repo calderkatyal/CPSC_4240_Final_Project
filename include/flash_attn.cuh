@@ -38,12 +38,6 @@ void flash_attention_v2(
     int B, int H, int N, int d, float scale, bool causal
 );
 
-void flash_attention_v2_prepare(
-    int B, int H, int N, int d
-);
-
-void flash_attention_v2_release_workspace();
-
 // ============================================================================
 // Ablation variants
 // ============================================================================

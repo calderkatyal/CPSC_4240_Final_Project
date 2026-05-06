@@ -24,7 +24,6 @@ SPEEDUP_BASELINE = "PyTorch attention baseline (fp16)"
 COLORS = {
     SPEEDUP_BASELINE: "#ff7f0e",
     "Simplified FA1": "#1f77b4",
-    "Split-KV extension": "#2ca02c",
     "Official FlashAttention-1 (fp16)": "#9467bd",
     "Official FlashAttention-2 (fp16)": "#8c564b",
     "Ablation: no tensor cores": "#d62728",
@@ -36,7 +35,6 @@ COLORS = {
 MARKERS = {
     SPEEDUP_BASELINE: "D",
     "Simplified FA1": "o",
-    "Split-KV extension": "^",
     "Official FlashAttention-1 (fp16)": "P",
     "Official FlashAttention-2 (fp16)": "X",
     "Ablation: no tensor cores": "s",
@@ -92,7 +90,6 @@ def plot_memory_scaling(groups, title: str, output_path: Path) -> None:
     priority = [
         SPEEDUP_BASELINE,
         "Simplified FA1",
-        "Split-KV extension",
         "Official FlashAttention-1 (fp16)",
         "Official FlashAttention-2 (fp16)",
     ]
@@ -166,7 +163,6 @@ def plot_speedup_vs_baseline(groups, title: str, output_path: Path) -> None:
 def plot_ablation_bars(groups, title: str, output_path: Path) -> None:
     candidates = [
         "Simplified FA1",
-        "Split-KV extension",
         "Ablation: no tensor cores",
         "Ablation: no vectorized loads",
         "Ablation: no online softmax",

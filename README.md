@@ -4,7 +4,6 @@ This repository contains a CUDA C++ implementation of a simplified FlashAttentio
 
 - a shared PyTorch eager-attention baseline that matches the official FlashAttention benchmark style
 - a simplified FlashAttention-1-style kernel
-- a split-KV extension motivated by later FlashAttention kernels
 - ablations of key FlashAttention-1 ideas
 - official FlashAttention-1 and FlashAttention-2 baselines
 

@@ -300,8 +300,7 @@ __global__ void flash_attn_no_tensor_cores_kernel(
     constexpr int num_o_frags = HEAD_DIM / PROJECT_TILE;
     constexpr int d_padded = HEAD_DIM + SMEM_PAD;
     constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-    constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
-    constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
+    constexpr int kv_buf_elems = shared_kv_buffer_elems<d_padded, bn_padded>();
 
     const int batch_head = blockIdx.z;
     const int warp_id = threadIdx.x / PROJECT_WARP_SIZE;
@@ -564,8 +563,7 @@ void launch_no_tensor_cores_hdim(
 ) {
     constexpr int d_padded = HEAD_DIM + SMEM_PAD;
     constexpr int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
-    constexpr int kv_buf_stride = (d_padded > bn_padded) ? d_padded : bn_padded;
-    constexpr int kv_buf_elems = PROJECT_BLOCK_N * kv_buf_stride;
+    constexpr int kv_buf_elems = shared_kv_buffer_elems<d_padded, bn_padded>();
 
     const int BH = B * H;
     const int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
