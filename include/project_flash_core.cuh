@@ -8,21 +8,11 @@ namespace project_flash {
 
 namespace wmma = nvcuda::wmma;
 
-__device__ inline void load_q_tile(
-    project_in_t* s_q,
-    const project_in_t* q_base,
-    int q_start,
-    int N,
-    int d
-) {
-    const project_in_t zero = __float2half(0.0f);
-    for (int idx = threadIdx.x; idx < PROJECT_TILE * d; idx += blockDim.x) {
-        int row = idx / d;
-        int col = idx % d;
-        int global_row = q_start + row;
-        s_q[idx] = (global_row < N) ? q_base[global_row * d + col] : zero;
-    }
-}
+// Shared memory padding (in halfs) to break bank-conflict alignment.
+// Stride d+2 gives bank offset of 1 per row, eliminating systematic conflicts.
+constexpr int SMEM_PAD = 2;
+
+// ---- Legacy helpers used by ablation kernels (unpadded strides) --------
 
 __device__ inline void load_kv_block(
     project_in_t* s_kt,
@@ -102,6 +92,21 @@ __device__ inline void compute_score_block_tensor_core(
     }
 }
 
+// ========================================================================
+// Core FA1 kernel — register-resident O and softmax
+//
+// Key optimisations vs. the previous version:
+//   1. O accumulator lives in WMMA register fragments, not shared memory.
+//      Eliminates 16 KB smem and all per-KV-block O load/store traffic.
+//   2. Scores stay in register fragments; softmax runs on registers using
+//      the documented m16n16k16 accumulator layout (sm_70+).
+//      Eliminates 16 KB smem for s_scores.
+//   3. Shared-memory strides are padded by SMEM_PAD to avoid bank conflicts
+//      (original stride d=64 ≡ 0 mod 32 → 16-way conflicts).
+//   4. Total smem drops from ~56 KB to ~25 KB, raising occupancy from
+//      ~2 blocks/SM to ~5 blocks/SM.
+// ========================================================================
+
 static __global__ void flash_attention_core_kernel(
     const project_in_t* __restrict__ Q,
     const project_in_t* __restrict__ K,
@@ -112,60 +117,74 @@ static __global__ void flash_attention_core_kernel(
     float scale,
     bool causal
 ) {
-    int batch_head = blockIdx.z;
-    int warp_id = threadIdx.x / PROJECT_WARP_SIZE;
-    int lane = threadIdx.x % PROJECT_WARP_SIZE;
-    int q_block_start = blockIdx.x * PROJECT_BLOCK_M;
-    int q_start = q_block_start + warp_id * PROJECT_TILE;
+    const int batch_head = blockIdx.z;
+    const int warp_id    = threadIdx.x / PROJECT_WARP_SIZE;
+    const int lane       = threadIdx.x % PROJECT_WARP_SIZE;
+    const int q_block_start = blockIdx.x * PROJECT_BLOCK_M;
+    const int q_start       = q_block_start + warp_id * PROJECT_TILE;
+
+    // ---- WMMA m16n16k16 float-accumulator element-to-matrix mapping ----
+    // group g = lane/4  (0-7),  thread-in-group p = lane%4  (0-3)
+    //   elts 0,1 → row g,   cols p*2,   p*2+1
+    //   elts 2,3 → row g+8, cols p*2,   p*2+1
+    //   elts 4,5 → row g,   cols p*2+8, p*2+9
+    //   elts 6,7 → row g+8, cols p*2+8, p*2+9
+    const int fg = lane / 4;
+    const int fp = lane % 4;
+    const int frow0 = fg;            // first row this thread owns
+    const int frow1 = fg + 8;        // second row this thread owns
+    const int global_row0 = q_start + frow0;
+    const int global_row1 = q_start + frow1;
 
     const project_in_t* q_base = Q + batch_head * N * d;
     const project_in_t* k_base = K + batch_head * N * d;
     const project_in_t* v_base = V + batch_head * N * d;
-    project_out_t* o_base = O + batch_head * N * d;
+    project_out_t*      o_base = O + batch_head * N * d;
 
+    // Padded strides
+    const int d_padded  = d + SMEM_PAD;
+    const int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
+
+    // Buffer for s_kt / s_p must fit both layouts
+    int kv_buf_elems = PROJECT_BLOCK_N * d_padded;
+    if (PROJECT_BLOCK_M * bn_padded > kv_buf_elems)
+        kv_buf_elems = PROJECT_BLOCK_M * bn_padded;
+
+    // ---- Shared memory layout ----
     extern __shared__ unsigned char smem_raw[];
+    project_in_t* s_q  = reinterpret_cast<project_in_t*>(smem_raw);
+    project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d_padded;
+    project_in_t* s_v  = s_kt + kv_buf_elems;
+    project_in_t* s_p  = s_kt;   // alias — reused after scores are consumed
 
-    int kv_p_elems = PROJECT_BLOCK_N * d;
-    if (PROJECT_BLOCK_M * PROJECT_BLOCK_N > kv_p_elems)
-        kv_p_elems = PROJECT_BLOCK_M * PROJECT_BLOCK_N;
-
-    project_in_t* s_q = reinterpret_cast<project_in_t*>(smem_raw);
-    project_in_t* s_kt = s_q + PROJECT_BLOCK_M * d;
-    project_in_t* s_v = s_kt + kv_p_elems;
-    float* s_scores = reinterpret_cast<float*>(s_v + PROJECT_BLOCK_N * d);
-    float* s_o = s_scores + PROJECT_BLOCK_M * PROJECT_BLOCK_N;
-    float* s_m = s_o + PROJECT_BLOCK_M * d;
-    float* s_l = s_m + PROJECT_BLOCK_M;
-    project_in_t* s_p = s_kt;
-
-    project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d;
-    float* s_scores_warp = s_scores + warp_id * PROJECT_TILE * PROJECT_BLOCK_N;
-    float* s_o_warp = s_o + warp_id * PROJECT_TILE * d;
-    project_in_t* s_p_warp = s_p + warp_id * PROJECT_TILE * PROJECT_BLOCK_N;
+    project_in_t* s_q_warp = s_q + warp_id * PROJECT_TILE * d_padded;
+    project_in_t* s_p_warp = s_p + warp_id * PROJECT_TILE * bn_padded;
 
     const project_in_t zero = __float2half(0.0f);
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
-        int row = idx / d;
-        int col = idx % d;
-        int global_row = q_block_start + row;
-        s_q[idx] = (global_row < N) ? q_base[global_row * d + col] : zero;
+
+    // ---- Load Q to shared memory (with pad columns zeroed) ----
+    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d_padded;
+         idx += blockDim.x) {
+        int row = idx / d_padded;
+        int col = idx % d_padded;
+        int gr  = q_block_start + row;
+        s_q[idx] = (col < d && gr < N) ? q_base[gr * d + col] : zero;
     }
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
-        s_o[idx] = 0.0f;
-    }
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M; idx += blockDim.x) {
-        s_m[idx] = -FLT_MAX;
-        s_l[idx] = 0.0f;
-    }
+
+    // ---- Register-resident O accumulators ----
+    const int num_o_frags = d / PROJECT_TILE;
+    wmma::fragment<wmma::accumulator, PROJECT_TILE, PROJECT_TILE,
+                   PROJECT_TILE, float> o_frag[PROJECT_MAX_D / PROJECT_TILE];
+    for (int f = 0; f < num_o_frags; f++)
+        wmma::fill_fragment(o_frag[f], 0.0f);
+
+    // Per-thread running max / sum for the two rows this thread tracks
+    float m0 = -FLT_MAX, m1 = -FLT_MAX;
+    float l0 = 0.0f,     l1 = 0.0f;
+
     __syncthreads();
 
-    int row_in_tile = lane % PROJECT_TILE;
-    int col_half = lane / PROJECT_TILE;
-    int half_cols = PROJECT_BLOCK_N / 2;
-    int col_start = col_half * half_cols;
-    int half_d = d / 2;
-    int d_start = col_half * half_d;
-
+    // ---- KV iteration bounds (with causal early termination) ----
     int num_kv_tiles = cdiv(N, PROJECT_BLOCK_N);
     if (causal) {
         int q_end = q_block_start + PROJECT_BLOCK_M - 1;
@@ -173,111 +192,215 @@ static __global__ void flash_attention_core_kernel(
         int causal_limit = cdiv(q_end + 1, PROJECT_BLOCK_N);
         if (causal_limit < num_kv_tiles) num_kv_tiles = causal_limit;
     }
+
     for (int kv_tile = 0; kv_tile < num_kv_tiles; kv_tile++) {
-        int kv_start = kv_tile * PROJECT_BLOCK_N;
+        const int kv_start = kv_tile * PROJECT_BLOCK_N;
 
-        load_kv_block(s_kt, s_v, k_base, v_base, kv_start, N, d);
-        __syncthreads();
-
-        compute_score_block_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale);
-        __syncthreads();
-
-        {
-            int global_row = q_start + row_in_tile;
-            bool row_valid = (global_row < N);
-            int m_idx = warp_id * PROJECT_TILE + row_in_tile;
-
-            float local_max = -FLT_MAX;
-            if (row_valid) {
-                for (int j = col_start; j < col_start + half_cols; j++) {
-                    int kv_idx = kv_start + j;
-                    if (kv_idx < N && (!causal || kv_idx <= global_row)) {
-                        local_max = fmaxf(local_max,
-                            s_scores_warp[row_in_tile * PROJECT_BLOCK_N + j]);
-                    }
-                }
+        // ============================================================
+        // 1.  Load K and V to shared memory
+        // ============================================================
+        for (int idx = threadIdx.x; idx < PROJECT_BLOCK_N * d_padded;
+             idx += blockDim.x) {
+            int row = idx / d_padded;
+            int col = idx % d_padded;
+            int gr  = kv_start + row;
+            project_in_t kv = zero, vv = zero;
+            if (col < d && gr < N) {
+                kv = k_base[gr * d + col];
+                vv = v_base[gr * d + col];
             }
-            float partner = __shfl_xor_sync(0xFFFFFFFF, local_max, PROJECT_TILE);
-            float row_max = fmaxf(local_max, partner);
-
-            float old_m = s_m[m_idx];
-            float new_m = fmaxf(old_m, row_max);
-            float alpha = expf(old_m - new_m);
-
-            if (row_valid) {
-                for (int dd = d_start; dd < d_start + half_d; dd++) {
-                    s_o_warp[row_in_tile * d + dd] *= alpha;
-                }
-            }
-
-            float local_sum = 0.0f;
-            if (row_valid) {
-                for (int j = col_start; j < col_start + half_cols; j++) {
-                    int kv_idx = kv_start + j;
-                    float p_val;
-                    if (kv_idx >= N || (causal && kv_idx > global_row)) {
-                        p_val = 0.0f;
-                    } else {
-                        p_val = expf(
-                            s_scores_warp[row_in_tile * PROJECT_BLOCK_N + j] - new_m);
-                    }
-                    local_sum += p_val;
-                    s_p_warp[row_in_tile * PROJECT_BLOCK_N + j] = __float2half(p_val);
-                }
-            } else {
-                for (int j = col_start; j < col_start + half_cols; j++) {
-                    s_p_warp[row_in_tile * PROJECT_BLOCK_N + j] = zero;
-                }
-            }
-
-            partner = __shfl_xor_sync(0xFFFFFFFF, local_sum, PROJECT_TILE);
-            float row_sum = local_sum + partner;
-
-            if (col_half == 0) {
-                s_l[m_idx] = s_l[m_idx] * alpha + row_sum;
-                s_m[m_idx] = new_m;
-            }
+            s_kt[idx] = kv;
+            s_v[idx]  = vv;
         }
-        __syncwarp();
+        __syncthreads();
+
+        // ============================================================
+        // 2.  S = Q @ K^T   →  register score fragments
+        // ============================================================
+        wmma::fragment<wmma::accumulator, PROJECT_TILE, PROJECT_TILE,
+                       PROJECT_TILE, float> sf[PROJECT_K_TILES_PER_BLOCK];
 
         #pragma unroll
-        for (int dd = 0; dd < d; dd += PROJECT_TILE) {
-            wmma::fragment<wmma::accumulator, PROJECT_TILE, PROJECT_TILE,
-                           PROJECT_TILE, float> c_frag;
-            wmma::load_matrix_sync(c_frag, s_o_warp + dd, d,
-                                   wmma::mem_row_major);
+        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+            wmma::fill_fragment(sf[tn], 0.0f);
+            #pragma unroll
+            for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
+                wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
+                               PROJECT_TILE, project_in_t,
+                               wmma::row_major> a;
+                wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
+                               PROJECT_TILE, project_in_t,
+                               wmma::col_major> b;
+                wmma::load_matrix_sync(a, s_q_warp + k0, d_padded);
+                wmma::load_matrix_sync(
+                    b, s_kt + tn * PROJECT_TILE * d_padded + k0, d_padded);
+                wmma::mma_sync(sf[tn], a, b, sf[tn]);
+            }
+            #pragma unroll
+            for (int i = 0; i < sf[tn].num_elements; i++)
+                sf[tn].x[i] *= scale;
+        }
 
+        // All warps must finish reading s_kt before P overwrites it
+        __syncthreads();
+
+        // ============================================================
+        // 3.  Online softmax  (entirely in registers + warp shuffles)
+        // ============================================================
+        const bool r0v = (global_row0 < N);
+        const bool r1v = (global_row1 < N);
+
+        // --- row max ---
+        float mx0 = -FLT_MAX, mx1 = -FLT_MAX;
+        #pragma unroll
+        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+            int bc = kv_start + tn * PROJECT_TILE;
+            int c0 = bc + fp * 2, c1 = c0 + 1;
+            int c4 = bc + fp * 2 + 8, c5 = c4 + 1;
+            if (r0v) {
+                if (c0 < N && (!causal || c0 <= global_row0))
+                    mx0 = fmaxf(mx0, sf[tn].x[0]);
+                if (c1 < N && (!causal || c1 <= global_row0))
+                    mx0 = fmaxf(mx0, sf[tn].x[1]);
+                if (c4 < N && (!causal || c4 <= global_row0))
+                    mx0 = fmaxf(mx0, sf[tn].x[4]);
+                if (c5 < N && (!causal || c5 <= global_row0))
+                    mx0 = fmaxf(mx0, sf[tn].x[5]);
+            }
+            if (r1v) {
+                if (c0 < N && (!causal || c0 <= global_row1))
+                    mx1 = fmaxf(mx1, sf[tn].x[2]);
+                if (c1 < N && (!causal || c1 <= global_row1))
+                    mx1 = fmaxf(mx1, sf[tn].x[3]);
+                if (c4 < N && (!causal || c4 <= global_row1))
+                    mx1 = fmaxf(mx1, sf[tn].x[6]);
+                if (c5 < N && (!causal || c5 <= global_row1))
+                    mx1 = fmaxf(mx1, sf[tn].x[7]);
+            }
+        }
+        // Reduce across p = 0..3 (lanes within same group share a row)
+        mx0 = fmaxf(mx0, __shfl_xor_sync(0xFFFFFFFF, mx0, 1));
+        mx0 = fmaxf(mx0, __shfl_xor_sync(0xFFFFFFFF, mx0, 2));
+        mx1 = fmaxf(mx1, __shfl_xor_sync(0xFFFFFFFF, mx1, 1));
+        mx1 = fmaxf(mx1, __shfl_xor_sync(0xFFFFFFFF, mx1, 2));
+
+        const float nm0 = fmaxf(m0, mx0);
+        const float nm1 = fmaxf(m1, mx1);
+        const float a0  = expf(m0 - nm0);
+        const float a1  = expf(m1 - nm1);
+
+        // --- rescale O accumulators ---
+        #pragma unroll
+        for (int f = 0; f < num_o_frags; f++) {
+            o_frag[f].x[0] *= a0; o_frag[f].x[1] *= a0;
+            o_frag[f].x[2] *= a1; o_frag[f].x[3] *= a1;
+            o_frag[f].x[4] *= a0; o_frag[f].x[5] *= a0;
+            o_frag[f].x[6] *= a1; o_frag[f].x[7] *= a1;
+        }
+
+        // --- exp + write P to shared memory ---
+        float sum0 = 0.0f, sum1 = 0.0f;
+        #pragma unroll
+        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+            int bc = kv_start + tn * PROJECT_TILE;
+            int c0 = bc + fp * 2, c1 = c0 + 1;
+            int c4 = bc + fp * 2 + 8, c5 = c4 + 1;
+
+            float p0 = 0, p1 = 0, p4 = 0, p5 = 0;
+            float p2 = 0, p3 = 0, p6 = 0, p7 = 0;
+            if (r0v) {
+                if (c0 < N && (!causal || c0 <= global_row0))
+                    p0 = expf(sf[tn].x[0] - nm0);
+                if (c1 < N && (!causal || c1 <= global_row0))
+                    p1 = expf(sf[tn].x[1] - nm0);
+                if (c4 < N && (!causal || c4 <= global_row0))
+                    p4 = expf(sf[tn].x[4] - nm0);
+                if (c5 < N && (!causal || c5 <= global_row0))
+                    p5 = expf(sf[tn].x[5] - nm0);
+            }
+            if (r1v) {
+                if (c0 < N && (!causal || c0 <= global_row1))
+                    p2 = expf(sf[tn].x[2] - nm1);
+                if (c1 < N && (!causal || c1 <= global_row1))
+                    p3 = expf(sf[tn].x[3] - nm1);
+                if (c4 < N && (!causal || c4 <= global_row1))
+                    p6 = expf(sf[tn].x[6] - nm1);
+                if (c5 < N && (!causal || c5 <= global_row1))
+                    p7 = expf(sf[tn].x[7] - nm1);
+            }
+
+            sum0 += p0 + p1 + p4 + p5;
+            sum1 += p2 + p3 + p6 + p7;
+
+            int pc = tn * PROJECT_TILE;
+            s_p_warp[frow0 * bn_padded + pc + fp * 2]     = __float2half(p0);
+            s_p_warp[frow0 * bn_padded + pc + fp * 2 + 1] = __float2half(p1);
+            s_p_warp[frow0 * bn_padded + pc + fp * 2 + 8] = __float2half(p4);
+            s_p_warp[frow0 * bn_padded + pc + fp * 2 + 9] = __float2half(p5);
+            s_p_warp[frow1 * bn_padded + pc + fp * 2]     = __float2half(p2);
+            s_p_warp[frow1 * bn_padded + pc + fp * 2 + 1] = __float2half(p3);
+            s_p_warp[frow1 * bn_padded + pc + fp * 2 + 8] = __float2half(p6);
+            s_p_warp[frow1 * bn_padded + pc + fp * 2 + 9] = __float2half(p7);
+        }
+
+        sum0 += __shfl_xor_sync(0xFFFFFFFF, sum0, 1);
+        sum0 += __shfl_xor_sync(0xFFFFFFFF, sum0, 2);
+        sum1 += __shfl_xor_sync(0xFFFFFFFF, sum1, 1);
+        sum1 += __shfl_xor_sync(0xFFFFFFFF, sum1, 2);
+
+        l0 = l0 * a0 + sum0;
+        l1 = l1 * a1 + sum1;
+        m0 = nm0;
+        m1 = nm1;
+
+        __syncwarp();
+
+        // ============================================================
+        // 4.  O += P @ V   (WMMA, O stays in register fragments)
+        // ============================================================
+        #pragma unroll
+        for (int dd = 0; dd < d; dd += PROJECT_TILE) {
             #pragma unroll
             for (int kk = 0; kk < PROJECT_BLOCK_N; kk += PROJECT_TILE) {
                 wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
                                PROJECT_TILE, project_in_t,
-                               wmma::row_major> p_frag;
+                               wmma::row_major> pf;
                 wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
                                PROJECT_TILE, project_in_t,
-                               wmma::row_major> v_frag;
-
-                wmma::load_matrix_sync(p_frag, s_p_warp + kk,
-                                       PROJECT_BLOCK_N);
-                wmma::load_matrix_sync(v_frag, s_v + kk * d + dd, d);
-
-                wmma::mma_sync(c_frag, p_frag, v_frag, c_frag);
+                               wmma::row_major> vf;
+                wmma::load_matrix_sync(pf, s_p_warp + kk, bn_padded);
+                wmma::load_matrix_sync(
+                    vf, s_v + kk * d_padded + dd, d_padded);
+                wmma::mma_sync(o_frag[dd / PROJECT_TILE], pf, vf,
+                               o_frag[dd / PROJECT_TILE]);
             }
-
-            wmma::store_matrix_sync(s_o_warp + dd, c_frag, d,
-                                    wmma::mem_row_major);
         }
 
         __syncthreads();
     }
 
-    for (int idx = threadIdx.x; idx < PROJECT_BLOCK_M * d; idx += blockDim.x) {
-        int row = idx / d;
-        int col = idx % d;
-        int global_row = q_block_start + row;
-        if (global_row < N) {
-            float l = s_l[row];
-            float inv_l = (l > 0.0f) ? (1.0f / l) : 0.0f;
-            o_base[global_row * d + col] = s_o[row * d + col] * inv_l;
+    // ================================================================
+    // 5.  Write O / l to global memory
+    // ================================================================
+    const float inv_l0 = (l0 > 0.0f) ? (1.0f / l0) : 0.0f;
+    const float inv_l1 = (l1 > 0.0f) ? (1.0f / l1) : 0.0f;
+
+    if (global_row0 < N) {
+        for (int f = 0; f < num_o_frags; f++) {
+            int bc = f * PROJECT_TILE;
+            o_base[global_row0 * d + bc + fp * 2]     = o_frag[f].x[0] * inv_l0;
+            o_base[global_row0 * d + bc + fp * 2 + 1] = o_frag[f].x[1] * inv_l0;
+            o_base[global_row0 * d + bc + fp * 2 + 8] = o_frag[f].x[4] * inv_l0;
+            o_base[global_row0 * d + bc + fp * 2 + 9] = o_frag[f].x[5] * inv_l0;
+        }
+    }
+    if (global_row1 < N) {
+        for (int f = 0; f < num_o_frags; f++) {
+            int bc = f * PROJECT_TILE;
+            o_base[global_row1 * d + bc + fp * 2]     = o_frag[f].x[2] * inv_l1;
+            o_base[global_row1 * d + bc + fp * 2 + 1] = o_frag[f].x[3] * inv_l1;
+            o_base[global_row1 * d + bc + fp * 2 + 8] = o_frag[f].x[6] * inv_l1;
+            o_base[global_row1 * d + bc + fp * 2 + 9] = o_frag[f].x[7] * inv_l1;
         }
     }
 }
@@ -296,18 +419,19 @@ inline void launch_flash_attention_core(
 ) {
     check_supported_head_dim(d);
 
-    int BH = B * H;
-    int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
-    int kv_p_elems = PROJECT_BLOCK_N * d;
-    if (PROJECT_BLOCK_M * PROJECT_BLOCK_N > kv_p_elems)
-        kv_p_elems = PROJECT_BLOCK_M * PROJECT_BLOCK_N;
-    size_t smem_bytes = (PROJECT_BLOCK_M * d) * sizeof(project_in_t);
-    smem_bytes += kv_p_elems * sizeof(project_in_t);
-    smem_bytes += (PROJECT_BLOCK_N * d) * sizeof(project_in_t);
-    smem_bytes += (PROJECT_BLOCK_M * PROJECT_BLOCK_N) * sizeof(float);
-    smem_bytes += (PROJECT_BLOCK_M * d) * sizeof(float);
-    smem_bytes += PROJECT_BLOCK_M * sizeof(float);
-    smem_bytes += PROJECT_BLOCK_M * sizeof(float);
+    const int BH = B * H;
+    const int num_q_tiles = cdiv(N, PROJECT_BLOCK_M);
+    const int d_padded  = d + SMEM_PAD;
+    const int bn_padded = PROJECT_BLOCK_N + SMEM_PAD;
+
+    int kv_buf_elems = PROJECT_BLOCK_N * d_padded;
+    if (PROJECT_BLOCK_M * bn_padded > kv_buf_elems)
+        kv_buf_elems = PROJECT_BLOCK_M * bn_padded;
+
+    size_t smem_bytes = 0;
+    smem_bytes += PROJECT_BLOCK_M * d_padded  * sizeof(project_in_t); // s_q
+    smem_bytes += kv_buf_elems                * sizeof(project_in_t); // s_kt / s_p
+    smem_bytes += PROJECT_BLOCK_N * d_padded  * sizeof(project_in_t); // s_v
 
     dim3 block(PROJECT_THREADS);
     dim3 grid(num_q_tiles, 1, BH);
