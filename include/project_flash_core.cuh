@@ -116,7 +116,7 @@ static __global__ void flash_attention_core_kernel(
     project_out_t* __restrict__ O,
     int N,
     int d,
-    float scale_l2,
+    float scale,
     bool causal
 ) {
     const int batch_head = blockIdx.z;
@@ -125,6 +125,12 @@ static __global__ void flash_attention_core_kernel(
     const int q_block_start = blockIdx.x * PROJECT_BLOCK_M;
     const int q_start       = q_block_start + warp_id * PROJECT_TILE;
 
+    // ---- WMMA m16n16k16 float-accumulator element-to-matrix mapping ----
+    // group g = lane/4  (0-7),  thread-in-group p = lane%4  (0-3)
+    //   elts 0,1 → row g,   cols p*2,   p*2+1
+    //   elts 2,3 → row g+8, cols p*2,   p*2+1
+    //   elts 4,5 → row g,   cols p*2+8, p*2+9
+    //   elts 6,7 → row g+8, cols p*2+8, p*2+9
     const int fg = lane / 4;
     const int fp = lane % 4;
     const int frow0 = fg;            // first row this thread owns
@@ -217,30 +223,24 @@ static __global__ void flash_attention_core_kernel(
                        PROJECT_TILE, float> sf[PROJECT_K_TILES_PER_BLOCK];
 
         #pragma unroll
-        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++)
+        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
             wmma::fill_fragment(sf[tn], 0.0f);
-
-        #pragma unroll
-        for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
-            wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
-                           PROJECT_TILE, project_in_t,
-                           wmma::row_major> a;
-            wmma::load_matrix_sync(a, s_q_warp + k0, d_padded);
             #pragma unroll
-            for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
+            for (int k0 = 0; k0 < d; k0 += PROJECT_TILE) {
+                wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
+                               PROJECT_TILE, project_in_t,
+                               wmma::row_major> a;
                 wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
                                PROJECT_TILE, project_in_t,
                                wmma::col_major> b;
+                wmma::load_matrix_sync(a, s_q_warp + k0, d_padded);
                 wmma::load_matrix_sync(
                     b, s_kt + tn * PROJECT_TILE * d_padded + k0, d_padded);
                 wmma::mma_sync(sf[tn], a, b, sf[tn]);
             }
-        }
-        #pragma unroll
-        for (int tn = 0; tn < PROJECT_K_TILES_PER_BLOCK; tn++) {
             #pragma unroll
             for (int i = 0; i < sf[tn].num_elements; i++)
-                sf[tn].x[i] *= scale_l2;
+                sf[tn].x[i] *= scale;
         }
 
         // All warps must finish reading s_kt before P overwrites it
@@ -288,8 +288,8 @@ static __global__ void flash_attention_core_kernel(
 
         const float nm0 = fmaxf(m0, mx0);
         const float nm1 = fmaxf(m1, mx1);
-        const float a0  = exp2f(m0 - nm0);
-        const float a1  = exp2f(m1 - nm1);
+        const float a0  = expf(m0 - nm0);
+        const float a1  = expf(m1 - nm1);
 
         // --- rescale O accumulators ---
         #pragma unroll
@@ -312,23 +312,23 @@ static __global__ void flash_attention_core_kernel(
             float p2 = 0, p3 = 0, p6 = 0, p7 = 0;
             if (r0v) {
                 if (c0 < N && (!causal || c0 <= global_row0))
-                    p0 = exp2f(sf[tn].x[0] - nm0);
+                    p0 = expf(sf[tn].x[0] - nm0);
                 if (c1 < N && (!causal || c1 <= global_row0))
-                    p1 = exp2f(sf[tn].x[1] - nm0);
+                    p1 = expf(sf[tn].x[1] - nm0);
                 if (c4 < N && (!causal || c4 <= global_row0))
-                    p4 = exp2f(sf[tn].x[4] - nm0);
+                    p4 = expf(sf[tn].x[4] - nm0);
                 if (c5 < N && (!causal || c5 <= global_row0))
-                    p5 = exp2f(sf[tn].x[5] - nm0);
+                    p5 = expf(sf[tn].x[5] - nm0);
             }
             if (r1v) {
                 if (c0 < N && (!causal || c0 <= global_row1))
-                    p2 = exp2f(sf[tn].x[2] - nm1);
+                    p2 = expf(sf[tn].x[2] - nm1);
                 if (c1 < N && (!causal || c1 <= global_row1))
-                    p3 = exp2f(sf[tn].x[3] - nm1);
+                    p3 = expf(sf[tn].x[3] - nm1);
                 if (c4 < N && (!causal || c4 <= global_row1))
-                    p6 = exp2f(sf[tn].x[6] - nm1);
+                    p6 = expf(sf[tn].x[6] - nm1);
                 if (c5 < N && (!causal || c5 <= global_row1))
-                    p7 = exp2f(sf[tn].x[7] - nm1);
+                    p7 = expf(sf[tn].x[7] - nm1);
             }
 
             sum0 += p0 + p1 + p4 + p5;
@@ -361,16 +361,16 @@ static __global__ void flash_attention_core_kernel(
         // 4.  O += P @ V   (WMMA, O stays in register fragments)
         // ============================================================
         #pragma unroll
-        for (int kk = 0; kk < PROJECT_BLOCK_N; kk += PROJECT_TILE) {
-            wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
-                           PROJECT_TILE, project_in_t,
-                           wmma::row_major> pf;
-            wmma::load_matrix_sync(pf, s_p_warp + kk, bn_padded);
+        for (int dd = 0; dd < d; dd += PROJECT_TILE) {
             #pragma unroll
-            for (int dd = 0; dd < d; dd += PROJECT_TILE) {
+            for (int kk = 0; kk < PROJECT_BLOCK_N; kk += PROJECT_TILE) {
+                wmma::fragment<wmma::matrix_a, PROJECT_TILE, PROJECT_TILE,
+                               PROJECT_TILE, project_in_t,
+                               wmma::row_major> pf;
                 wmma::fragment<wmma::matrix_b, PROJECT_TILE, PROJECT_TILE,
                                PROJECT_TILE, project_in_t,
                                wmma::row_major> vf;
+                wmma::load_matrix_sync(pf, s_p_warp + kk, bn_padded);
                 wmma::load_matrix_sync(
                     vf, s_v + kk * d_padded + dd, d_padded);
                 wmma::mma_sync(o_frag[dd / PROJECT_TILE], pf, vf,
@@ -446,9 +446,8 @@ inline void launch_flash_attention_core(
         ));
     }
 
-    const float scale_l2 = scale * 1.4426950408889634f;
     flash_attention_core_kernel<<<grid, block, smem_bytes>>>(
-        d_Q, d_K, d_V, d_O, N, d, scale_l2, causal
+        d_Q, d_K, d_V, d_O, N, d, scale, causal
     );
 
     CUDA_CHECK(cudaGetLastError());

@@ -21,7 +21,7 @@ __global__ void two_pass_find_max_kernel(
     float* __restrict__ row_max,
     int N,
     int d,
-    float scale_l2,
+    float scale,
     bool causal
 ) {
     int batch_head = blockIdx.z;
@@ -63,7 +63,7 @@ __global__ void two_pass_find_max_kernel(
         int kv_start = kv_tile * PROJECT_BLOCK_N;
         load_kv_block(s_kt, nullptr, k_base, nullptr, kv_start, N, d);
         __syncthreads();
-        compute_score_block_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale_l2);
+        compute_score_block_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale);
         __syncwarp();
 
         if (lane < PROJECT_TILE) {
@@ -98,7 +98,7 @@ __global__ void two_pass_attn_kernel(
     project_out_t* __restrict__ O,
     int N,
     int d,
-    float scale_l2,
+    float scale,
     bool causal
 ) {
     int batch_head = blockIdx.z;
@@ -142,7 +142,7 @@ __global__ void two_pass_attn_kernel(
         int kv_start = kv_tile * PROJECT_BLOCK_N;
         load_kv_block(s_kt, s_v, k_base, v_base, kv_start, N, d);
         __syncthreads();
-        compute_score_block_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale_l2);
+        compute_score_block_tensor_core(s_scores_warp, s_q_warp, s_kt, d, scale);
         __syncwarp();
 
         if (lane < PROJECT_TILE) {
@@ -155,7 +155,7 @@ __global__ void two_pass_attn_kernel(
                         continue;
                     }
 
-                    float p = exp2f(s_scores_warp[lane * PROJECT_BLOCK_N + j] - m);
+                    float p = expf(s_scores_warp[lane * PROJECT_BLOCK_N + j] - m);
                     row_l += p;
                     for (int dd = 0; dd < d; dd++) {
                         row_o[dd] += p * __half2float(s_v[j * d + dd]);
@@ -185,7 +185,7 @@ __global__ void flash_attn_no_tiling_kernel(
     project_out_t* __restrict__ O,
     int N,
     int d,
-    float scale_l2,
+    float scale,
     bool causal
 ) {
     int batch_head = blockIdx.z;
@@ -242,11 +242,11 @@ __global__ void flash_attn_no_tiling_kernel(
                         dot += __half2float(s_q_warp[row_in_tile * d + dd])
                             * __half2float(k_base[kv_idx * d + dd]);
                     }
-                    row_max = fmaxf(row_max, dot * scale_l2);
+                    row_max = fmaxf(row_max, dot * scale);
                 }
 
                 float m_new = fmaxf(row_m, row_max);
-                float alpha = exp2f(row_m - m_new);
+                float alpha = expf(row_m - m_new);
 
                 for (int dd = 0; dd < d; dd++) {
                     row_o[dd] *= alpha;
@@ -265,7 +265,7 @@ __global__ void flash_attn_no_tiling_kernel(
                             * __half2float(k_base[kv_idx * d + dd]);
                     }
 
-                    float p = exp2f(dot * scale_l2 - m_new);
+                    float p = expf(dot * scale - m_new);
                     l_new += p;
                     for (int dd = 0; dd < d; dd++) {
                         row_o[dd] += p * __half2float(v_base[kv_idx * d + dd]);
@@ -324,9 +324,8 @@ void flash_attention_v1_no_online_softmax(
         ));
     }
 
-    const float scale_l2 = scale * 1.4426950408889634f;
     two_pass_find_max_kernel<<<grid, block, pass1_smem>>>(
-        d_Q, d_K, d_row_max, N, d, scale_l2, causal
+        d_Q, d_K, d_row_max, N, d, scale, causal
     );
     CUDA_CHECK(cudaGetLastError());
 
@@ -339,7 +338,7 @@ void flash_attention_v1_no_online_softmax(
     }
 
     two_pass_attn_kernel<<<grid, block, pass2_smem>>>(
-        d_Q, d_K, d_V, d_row_max, d_O, N, d, scale_l2, causal
+        d_Q, d_K, d_V, d_row_max, d_O, N, d, scale, causal
     );
     CUDA_CHECK(cudaGetLastError());
 
@@ -373,9 +372,8 @@ void flash_attention_v1_no_tiling(
         ));
     }
 
-    const float scale_l2 = scale * 1.4426950408889634f;
     flash_attn_no_tiling_kernel<<<grid, block, smem_bytes>>>(
-        d_Q, d_K, d_V, d_O, N, d, scale_l2, causal
+        d_Q, d_K, d_V, d_O, N, d, scale, causal
     );
 
     CUDA_CHECK(cudaGetLastError());
